@@ -1,0 +1,19 @@
+from __future__ import annotations
+
+from typing import NamedTuple
+
+
+class MessageTurn(NamedTuple):
+    role: str
+    content: str
+    time_created: int | None = None  # ms epoch of the turn's first message, if known
+
+
+class SessionRecord(NamedTuple):
+    source: str
+    session_id: str
+    title: str
+    date: str
+    messages: list[MessageTurn]
+    project_directory: str = ""
+    models_used: list[str] = []
