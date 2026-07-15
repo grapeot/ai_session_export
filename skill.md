@@ -1,8 +1,8 @@
 ---
 name: ai-session-export
 description: >-
-  Export AI coding session transcripts from OpenCode, Claude Code, Google Antigravity,
-  and Second Mind into a unified Markdown archive. Run as a CLI or periodic cron job.
+  Export AI coding session transcripts from OpenCode, Claude Code, Codex, Google
+  Antigravity, and Second Mind into a unified Markdown archive. Run as a CLI or periodic cron job.
 ---
 
 # AI Session Export Skill
@@ -33,6 +33,7 @@ python export_sessions.py
 
 # Export a specific source
 python export_sessions.py --source antigravity
+python export_sessions.py --source codex
 
 # Full re-export (ignore incremental cursor)
 python export_sessions.py --full
@@ -46,7 +47,11 @@ python export_sessions.py --dry-run
 # Override data paths
 python export_sessions.py --opencode-db /path/to/opencode.db
 python export_sessions.py --antigravity-dir /path/to/brain
+python export_sessions.py --codex-dir /path/to/codex/sessions
 ```
+
+The default private output root is `~/.local/share/ai-session-export/`. Override
+it with `--base-dir` and keep real transcripts outside public repositories.
 
 ## Output Contract
 
@@ -82,6 +87,7 @@ optional `project_directory`, optional `models_used`.
 |---|---|---|
 | OpenCode | `~/.local/share/opencode/opencode.db` | SQLite |
 | Claude Code | `~/.claude/projects/**/*.jsonl` | JSONL |
+| Codex | `~/.codex/sessions/**/*.jsonl`, `~/.codex/archived_sessions/*.jsonl` | JSONL |
 | Antigravity | `~/.gemini/antigravity-ide/brain/*/.system_generated/logs/transcript_full.jsonl` | JSONL |
 | Second Mind | `./second_mind_export.json` | JSON |
 

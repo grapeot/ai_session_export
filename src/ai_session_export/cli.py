@@ -5,19 +5,20 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
-from .sources import export_antigravity, export_claude_code, export_opencode, export_second_mind
+from .sources import export_antigravity, export_claude_code, export_codex, export_opencode, export_second_mind
 from .sources.antigravity import DEFAULT_ANTIGRAVITY_BRAIN_DIR
 from .sources.claude_code import DEFAULT_CLAUDE_HISTORY_FILES, DEFAULT_CLAUDE_PROJECT_DIRS
+from .sources.codex import DEFAULT_CODEX_SESSION_DIRS, DEFAULT_CODEX_SESSION_INDEX
 from .state import load_state, save_state
 from .utils import date_from_cli
 
 
-BASE_DIR = Path(__file__).resolve().parents[2]
+BASE_DIR = Path.home() / ".local" / "share" / "ai-session-export"
 SECOND_MIND_JSON = BASE_DIR / "second_mind_export.json"
 STATE_FILE = BASE_DIR / ".export_state.json"
 DEFAULT_OPENCODE_DB = Path.home() / ".local" / "share" / "opencode" / "opencode.db"
 
-SOURCE_CHOICES = ["all", "second-mind", "opencode", "claude-code", "antigravity"]
+SOURCE_CHOICES = ["all", "second-mind", "opencode", "claude-code", "antigravity", "codex"]
 
 
 def run_export(
@@ -33,6 +34,8 @@ def run_export(
     since_date: date | None = None,
     claude_project_dirs: tuple[Path, ...] | None = None,
     claude_history_files: tuple[Path, ...] | None = None,
+    codex_session_dirs: tuple[Path, ...] | None = None,
+    codex_session_index: Path = DEFAULT_CODEX_SESSION_INDEX,
 ) -> list[dict[str, Any]]:
     state = load_state(state_file)
     results: list[dict[str, Any]] = []
@@ -82,6 +85,18 @@ def run_export(
                 since_date=since_date,
             )
         )
+    if source in {"codex", "all"}:
+        results.append(
+            export_codex(
+                base_dir / "codex",
+                state,
+                full=full,
+                dry_run=dry_run,
+                since_date=since_date,
+                session_dirs=codex_session_dirs or DEFAULT_CODEX_SESSION_DIRS,
+                session_index=codex_session_index,
+            )
+        )
 
     if not dry_run:
         save_state(state, state_file)
@@ -103,6 +118,18 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_ANTIGRAVITY_BRAIN_DIR,
         help="Override Antigravity IDE brain directory.",
     )
+    parser.add_argument(
+        "--codex-dir",
+        type=Path,
+        action="append",
+        help="Override a Codex session directory; repeat for multiple roots.",
+    )
+    parser.add_argument(
+        "--codex-session-index",
+        type=Path,
+        default=DEFAULT_CODEX_SESSION_INDEX,
+        help="Override the Codex session_index.jsonl path.",
+    )
     parser.add_argument("--since-date", type=date_from_cli, help="Only export sessions on or after YYYY-MM-DD.")
     return parser.parse_args()
 
@@ -118,6 +145,8 @@ def main() -> None:
         second_mind_json=args.second_mind_json,
         opencode_db=args.opencode_db,
         antigravity_brain_dir=args.antigravity_dir,
+        codex_session_dirs=tuple(args.codex_dir) if args.codex_dir else None,
+        codex_session_index=args.codex_session_index,
         since_date=args.since_date,
     )
     for result in results:

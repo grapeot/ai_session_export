@@ -8,6 +8,7 @@ Export AI coding session transcripts from multiple tools into a unified Markdown
 |---|---|
 | OpenCode | `~/.local/share/opencode/opencode.db` |
 | Claude Code | `~/.claude/projects/**/*.jsonl` |
+| Codex | `~/.codex/sessions/**/*.jsonl`, `~/.codex/archived_sessions/*.jsonl` |
 | Google Antigravity | `~/.gemini/antigravity-ide/brain/*/.system_generated/logs/transcript_full.jsonl` |
 | Second Mind | `second_mind_export.json` |
 
@@ -22,6 +23,7 @@ python export_sessions.py
 
 # Export specific source
 python export_sessions.py --source antigravity
+python export_sessions.py --source codex
 
 # Full re-export (ignore incremental state)
 python export_sessions.py --full
@@ -32,6 +34,11 @@ python export_sessions.py --since-date 2026-06-01
 # Dry run
 python export_sessions.py --dry-run
 ```
+
+By default, output and incremental state are stored under
+`~/.local/share/ai-session-export/`. Use `--base-dir` and `--state-file` to
+target another private archive. Never write real session exports into a public
+repository.
 
 ## Output Format
 
