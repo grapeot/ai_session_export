@@ -50,6 +50,7 @@ Each adapter follows the same contract: a function `export_<name>(output_dir, st
 | `second_mind.py` | A single JSON array export at `second_mind_export.json`. | `json.loads` the whole file; each element is one conversation with `title`, `created_at`, and a `messages` list of `{role, content}`. Drops any non-`user`/`assistant` role. Incremental cursor is the count of conversations already seen (`last_export_count`). |
 | `opencode.py` | SQLite database at `~/.local/share/opencode/opencode.db`, opened read-only via the `file:...?mode=ro` URI. | Joins `session` -> `message` -> `part`. Text parts (`json_extract(data, '$.type') == 'text'`) are concatenated per message; model ids are collected from assistant messages. Sessions with zero user turns are skipped. Noise titles (sub-agent chatter) are filtered via `utils.should_skip_session`. Cursor is `session.time_created` (`last_session_time`). |
 | `claude_code.py` | JSONL session files under `~/.claude/projects/**/*.jsonl`, plus `history.jsonl` for human-readable titles. | Iterates session files (excluding anything under a `subagents/` path). Each line is one event; `user` and `assistant` events produce turns, `isSidechain` events are skipped. Assistant content is an array that may mix `text` and `tool_use` items — only `text` items survive. `tool_result` user messages produce empty text and are dropped. Titles are chosen from the history file when a meaningful `display` exists, otherwise from the first user message. Cursor is the max event timestamp (`last_timestamp`). |
+| `codex.py` | Rollout JSONL under `~/.codex/sessions/` and `~/.codex/archived_sessions/`, plus `session_index.jsonl` for titles. | Keeps only `event_msg.user_message` and `event_msg.agent_message`. It drops developer instructions, reasoning, tool calls/results, token accounting, and world state. `session_meta` supplies id/cwd and `turn_context` supplies model ids. Per-session state updates one stable Markdown file as an active rollout grows; unchanged source mtimes skip reparsing. |
 | `antigravity.py` | JSONL transcripts at `~/.gemini/antigravity-ide/brain/*/.system_generated/logs/transcript_full.jsonl`. | One JSON object per line per "step". See the dedicated section below. Cursor is the max step timestamp (`last_timestamp`). |
 
 ## Antigravity Adapter Design
@@ -95,7 +96,8 @@ A single JSON state file (default `.export_state.json` next to the export root) 
   "second_mind": {"last_export_count": 12},
   "opencode": {"last_session_time": 1719648000000},
   "claude_code": {"last_timestamp": 1719648000000},
-  "antigravity": {"last_timestamp": 1719648000000}
+  "antigravity": {"last_timestamp": 1719648000000},
+  "codex": {"sessions": {"example-id": {"latest_timestamp": 1719648000000, "output_file": "20260629_example.md", "source_mtime_ns": 123}}}
 }
 ```
 
@@ -104,6 +106,7 @@ Each adapter carries its own cursor semantics because the sources expose time di
 - **Second Mind** has no per-conversation timestamp exposed reliably, so the cursor is a count of conversations already exported; on each run it exports only the conversations beyond that count.
 - **OpenCode** uses `session.time_created` (ms epoch) and re-queries rows with `time_created > last_session_time`.
 - **Claude Code** and **Antigravity** both reduce the transcript to a single `latest_timestamp_ms` (max over all kept events/steps) and skip sessions whose latest timestamp is at or before the cursor.
+- **Codex** uses per-session state because active rollout files keep growing and archived sessions can move between directories. The adapter rewrites the same output file when a session changes and skips unchanged files by source mtime.
 
 Two correctness properties are enforced uniformly:
 
@@ -120,13 +123,13 @@ Flags:
 
 | Flag | Purpose |
 |---|---|
-| `--source {all,second-mind,opencode,claude-code,antigravity}` | Select one source or all. |
+| `--source {all,second-mind,opencode,claude-code,antigravity,codex}` | Select one source or all. |
 | `--full` | Ignore cursors; export everything. |
 | `--dry-run` | Scan and report without writing or persisting state. |
 | `--since-date YYYY-MM-DD` | Drop sessions whose date is before the given day. |
-| `--base-dir` | Override the export root (default: project root). |
+| `--base-dir` | Override the export root (default: `~/.local/share/ai-session-export`). |
 | `--state-file` | Override the state cursor file. |
-| `--second-mind-json`, `--opencode-db`, `--antigravity-dir` | Override each source's input location. |
+| `--second-mind-json`, `--opencode-db`, `--antigravity-dir`, `--codex-dir`, `--codex-session-index` | Override each source's input location. |
 
 After each adapter runs, `main()` prints one summary line per source (`exported=N scanned=N`, or `exported=N total=N` for Second Mind).
 
@@ -136,7 +139,7 @@ The suite is split into four tiers, ordered from fastest/most-isolated to slowes
 
 1. **Unit tests** — pure functions with no I/O (`sanitize_filename`, `should_skip_session`, `render_markdown`, `yaml_string`, `unique_output_path`, `load_state`/`save_state`).
 2. **Source-adapter tests** — each adapter exercised against a synthetic fixture built in `tmp_path` (a hand-written JSONL/JSON file or a seeded SQLite database).
-3. **Integration test** — a single `run_export("all")` call that wires all four adapters into temp paths and asserts state is persisted with refreshed cursors.
+3. **Integration test** — a single `run_export("all")` call that wires all five adapters into temp paths and asserts state is persisted with refreshed cursors.
 4. **Live end-to-end tests** — opt-in via `AI_SESSION_EXPORT_LIVE=1`, run against the real local data on the developer's machine with a 7-day `--since-date` window. Skipped automatically in CI.
 
 See `docs/test.md` for the full per-test breakdown.

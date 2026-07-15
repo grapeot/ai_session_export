@@ -6,6 +6,12 @@ dist/
 build/
 .pytest_cache/
 .venv/
+.export_state.json
+antigravity/
+claude_code/
+codex/
+opencode/
+second_mind/
 .env
 .env.*
 !.env.example

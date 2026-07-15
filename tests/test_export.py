@@ -20,6 +20,12 @@ from ai_session_export.sources.antigravity import (
     export_antigravity,
 )
 from ai_session_export.sources.claude_code import export_claude_code, parse_claude_session_file
+from ai_session_export.sources.codex import (
+    DEFAULT_CODEX_SESSION_DIRS,
+    DEFAULT_CODEX_SESSION_INDEX,
+    export_codex,
+    parse_codex_session_file,
+)
 from ai_session_export.sources.opencode import export_opencode
 from ai_session_export.sources.second_mind import export_second_mind
 from ai_session_export.state import DEFAULT_STATE, load_state, save_state
@@ -137,6 +143,7 @@ def test_state_defaults() -> None:
     assert state["opencode"] == {"last_session_time": 0}
     assert state["claude_code"] == {"last_timestamp": 0}
     assert state["antigravity"] == {"last_timestamp": 0}
+    assert state["codex"] == {"sessions": {}}
 
 
 def test_unique_output_path(tmp_path: Path) -> None:
@@ -358,6 +365,75 @@ def _write_antigravity_transcript(brain_dir: Path, session_id: str = "antigravit
     )
 
 
+def _write_codex_session(session_dir: Path, index_file: Path, *, include_followup: bool = False) -> Path:
+    session_dir.mkdir(parents=True, exist_ok=True)
+    index_file.write_text(
+        json.dumps(
+            {
+                "id": "codex-fixture-1",
+                "thread_name": "Fixture Codex Task",
+                "updated_at": "2026-06-29T09:05:00Z",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    events = [
+        {
+            "timestamp": "2026-06-29T09:00:00Z",
+            "type": "session_meta",
+            "payload": {
+                "id": "codex-fixture-1",
+                "cwd": "/home/user/project",
+                "base_instructions": "private system instructions",
+            },
+        },
+        {
+            "timestamp": "2026-06-29T09:00:01Z",
+            "type": "turn_context",
+            "payload": {"cwd": "/home/user/project", "model": "fixture-codex-model"},
+        },
+        {
+            "timestamp": "2026-06-29T09:00:02Z",
+            "type": "event_msg",
+            "payload": {"type": "user_message", "message": "Review the fixture project"},
+        },
+        {
+            "timestamp": "2026-06-29T09:00:03Z",
+            "type": "event_msg",
+            "payload": {"type": "agent_reasoning", "text": "private reasoning"},
+        },
+        {
+            "timestamp": "2026-06-29T09:00:04Z",
+            "type": "response_item",
+            "payload": {"type": "function_call_output", "output": "private tool output"},
+        },
+        {
+            "timestamp": "2026-06-29T09:00:05Z",
+            "type": "event_msg",
+            "payload": {"type": "agent_message", "phase": "final_answer", "message": "The fixture looks good."},
+        },
+    ]
+    if include_followup:
+        events.extend(
+            [
+                {
+                    "timestamp": "2026-06-29T09:05:00Z",
+                    "type": "event_msg",
+                    "payload": {"type": "user_message", "message": "Anything else?"},
+                },
+                {
+                    "timestamp": "2026-06-29T09:05:01Z",
+                    "type": "event_msg",
+                    "payload": {"type": "agent_message", "phase": "final_answer", "message": "No further issues."},
+                },
+            ]
+        )
+    session_file = session_dir / "rollout-2026-06-29T09-00-00-codex-fixture-1.jsonl"
+    session_file.write_text("\n".join(json.dumps(event) for event in events) + "\n", encoding="utf-8")
+    return session_file
+
+
 # --------------------------------------------------------------------------- #
 # 2. Source adapter unit tests (tmp_path + synthetic fixtures)
 # --------------------------------------------------------------------------- #
@@ -490,6 +566,64 @@ def test_antigravity_export_with_fixture(tmp_path: Path) -> None:
     assert "view_file" not in text
 
 
+def test_codex_export_with_fixture_and_incremental_update(tmp_path: Path) -> None:
+    session_dir = tmp_path / "sessions"
+    index_file = tmp_path / "session_index.jsonl"
+    session_file = _write_codex_session(session_dir, index_file)
+    state = {"codex": {"sessions": {}}}
+    output_dir = tmp_path / "codex"
+
+    first = export_codex(
+        output_dir,
+        state,
+        full=False,
+        dry_run=False,
+        since_date=None,
+        session_dirs=(session_dir,),
+        session_index=index_file,
+    )
+    assert first == {"source": "codex", "scanned": 1, "exported": 1}
+    files = list(output_dir.glob("*.md"))
+    assert len(files) == 1
+    text = files[0].read_text(encoding="utf-8")
+    assert "source: codex" in text
+    assert "Fixture Codex Task" in text
+    assert "Review the fixture project" in text
+    assert "The fixture looks good." in text
+    assert "private reasoning" not in text
+    assert "private tool output" not in text
+    assert "private system instructions" not in text
+    assert "fixture-codex-model" in text
+    parsed = parse_codex_session_file(session_file, {"codex-fixture-1": "Fixture Codex Task"})
+    assert parsed is not None
+    assert [message.role for message in parsed.record.messages] == ["user", "assistant"]
+
+    unchanged = export_codex(
+        output_dir,
+        state,
+        full=False,
+        dry_run=False,
+        since_date=None,
+        session_dirs=(session_dir,),
+        session_index=index_file,
+    )
+    assert unchanged["exported"] == 0
+
+    _write_codex_session(session_dir, index_file, include_followup=True)
+    updated = export_codex(
+        output_dir,
+        state,
+        full=False,
+        dry_run=False,
+        since_date=None,
+        session_dirs=(session_dir,),
+        session_index=index_file,
+    )
+    assert updated["exported"] == 1
+    assert len(list(output_dir.glob("*.md"))) == 1
+    assert "No further issues." in files[0].read_text(encoding="utf-8")
+
+
 # --------------------------------------------------------------------------- #
 # 3. Integration test (self-contained; also runnable via `pytest -m integration`)
 # --------------------------------------------------------------------------- #
@@ -510,6 +644,10 @@ def test_cli_run_export_all_sources(tmp_path: Path) -> None:
     brain_dir = tmp_path / "brain"
     _write_antigravity_transcript(brain_dir)
 
+    codex_dir = tmp_path / "codex_sessions"
+    codex_index = tmp_path / "codex_session_index.jsonl"
+    _write_codex_session(codex_dir, codex_index)
+
     state_file = tmp_path / ".export_state.json"
     results = run_export(
         "all",
@@ -522,12 +660,20 @@ def test_cli_run_export_all_sources(tmp_path: Path) -> None:
         antigravity_brain_dir=brain_dir,
         claude_project_dirs=(projects_root,),
         claude_history_files=(history_file,),
+        codex_session_dirs=(codex_dir,),
+        codex_session_index=codex_index,
     )
 
-    assert {r["source"] for r in results} == {"second_mind", "opencode", "claude_code", "antigravity"}
+    assert {r["source"] for r in results} == {
+        "second_mind",
+        "opencode",
+        "claude_code",
+        "antigravity",
+        "codex",
+    }
 
     # Each source produced at least one markdown file under base_dir.
-    for sub in ("second_mind", "opencode", "claude_code", "antigravity"):
+    for sub in ("second_mind", "opencode", "claude_code", "antigravity", "codex"):
         assert list((tmp_path / sub).glob("*.md")), f"no markdown emitted for {sub}"
 
     # State file was persisted with refreshed counters.
@@ -536,6 +682,7 @@ def test_cli_run_export_all_sources(tmp_path: Path) -> None:
     assert persisted["opencode"]["last_session_time"] > 0
     assert persisted["claude_code"]["last_timestamp"] > 0
     assert persisted["antigravity"]["last_timestamp"] > 0
+    assert persisted["codex"]["sessions"]["codex-fixture-1"]["latest_timestamp"] > 0
 
 
 # --------------------------------------------------------------------------- #
@@ -615,3 +762,24 @@ class TestLiveExport:
         assert len(files) == result["exported"]
         sample = files[0].read_text(encoding="utf-8")
         assert "source: opencode" in sample
+
+    def test_live_codex_export(self, tmp_path: Path) -> None:
+        """Export recent Codex sessions without exposing transcript content."""
+        if not any(path.is_dir() for path in DEFAULT_CODEX_SESSION_DIRS):
+            pytest.skip("No Codex session directories found")
+
+        since = date.today() - timedelta(days=7)
+        result = export_codex(
+            tmp_path / "codex",
+            {},
+            full=True,
+            dry_run=False,
+            since_date=since,
+            session_dirs=DEFAULT_CODEX_SESSION_DIRS,
+            session_index=DEFAULT_CODEX_SESSION_INDEX,
+        )
+        files = list((tmp_path / "codex").glob("*.md"))
+        if result["exported"] == 0:
+            pytest.skip("No recent Codex sessions to export")
+        assert len(files) == result["exported"]
+        assert "source: codex" in files[0].read_text(encoding="utf-8")

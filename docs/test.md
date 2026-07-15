@@ -28,12 +28,13 @@ Each adapter is exercised against a synthetic fixture built inside `tmp_path`. T
 | `test_opencode_export_with_fixture` | A seeded SQLite database with one session, one user turn and one assistant turn, and a model id on the assistant message. | `exported == 1`; per-turn `[HH:MM]` headers are correct; `project_directory` and `models_used` appear in frontmatter; user and assistant text survive. |
 | `test_claude_code_export_with_fixture` | A synthetic `projects/` tree with one `.jsonl` session file plus a `history.jsonl` providing a human title. The session includes an assistant message that mixes a `tool_use` and a `text` item, and a `tool_result` user message. | The history title is chosen over the raw first-user-text fallback; the `tool_result` user message is dropped (empty text); the assistant `text` item survives despite the adjacent `tool_use`; `parse_claude_session_file` returns exactly `[user, assistant]` turns. |
 | `test_antigravity_export_with_fixture` | A synthetic brain directory with one session whose `transcript_full.jsonl` contains `USER_INPUT`, `CONVERSATION_HISTORY`, two `PLANNER_RESPONSE`, and a `CODE_ACTION` step. | Frontmatter `source`/`session_id`/`date`/`message_count` are correct; title is derived from the inner `<USER_REQUEST>` text; XML wrappers (`<USER_REQUEST>`, `<ADDITIONAL_METADATA>`) are stripped; only one `## User` and two `## Assistant` sections appear; tool-call names (`view_file`) are absent. |
+| `test_codex_export_with_fixture_and_incremental_update` | A synthetic rollout plus `session_index.jsonl`, including user/agent messages, reasoning, tool output, and system metadata. | Only user/agent narrative survives; title/cwd/model metadata are preserved; unchanged reruns export zero files; appending turns updates the original Markdown file instead of creating a suffix duplicate. |
 
 ## 3. Integration Test
 
 | Test | What it covers |
 |---|---|
-| `test_cli_run_export_all_sources` (marked `integration`) | Calls `run_export("all")` with all four synthetic fixtures wired into `tmp_path`, then asserts: (a) all four source keys appear in the results; (b) each per-source subdirectory under `base_dir` contains at least one `.md` file; (c) the persisted state file has refreshed, non-zero cursors for `opencode`, `claude_code`, and `antigravity`, and `last_export_count == 1` for `second_mind`. |
+| `test_cli_run_export_all_sources` (marked `integration`) | Calls `run_export("all")` with all five synthetic fixtures wired into `tmp_path`, then asserts every source appears, every source writes Markdown, and all persisted cursors including Codex per-session state are refreshed. |
 
 This is the only test that exercises `cli.py`'s dispatch and state-persistence logic end to end; it is the regression guard for the "adding a new source" checklist in `AGENTS.md`.
 
@@ -45,6 +46,7 @@ These tests run against the developer's real local data and are **opt-in**. They
 |---|---|
 | `test_live_antigravity_export` | Skips if the default brain directory does not exist. Runs a `--dry-run` scan first (asserts no files are written), then a real export over the last 7 days. Asserts the number of written files equals `result["exported"]` and that a sample file carries `source: antigravity`. Skips gracefully if there are no recent sessions. |
 | `test_live_opencode_export` | Skips if the default OpenCode database does not exist. Same dry-run-then-real pattern over the last 7 days. Asserts file count matches `exported` and that a sample carries `source: opencode`. |
+| `test_live_codex_export` | Skips if no default Codex session directory exists. Exports only the last 7 days to `tmp_path`, checks file counts, and verifies `source: codex` without printing transcript content. |
 
 To run the full suite including live tests on a populated machine:
 

@@ -9,6 +9,7 @@ DEFAULT_STATE = {
     "second_mind": {"last_export_count": 0},
     "opencode": {"last_session_time": 0},
     "claude_code": {"last_timestamp": 0},
+    "codex": {"sessions": {}},
     "antigravity": {"last_timestamp": 0},
 }
 
@@ -26,4 +27,7 @@ def load_state(state_file: Path) -> dict[str, Any]:
 
 
 def save_state(state: dict[str, Any], state_file: Path) -> None:
-    state_file.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    state_file.parent.mkdir(parents=True, exist_ok=True)
+    temp_file = state_file.with_name(f".{state_file.name}.tmp")
+    temp_file.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    temp_file.replace(state_file)
