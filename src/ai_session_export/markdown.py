@@ -19,6 +19,9 @@ def render_markdown(session: SessionRecord) -> str:
         lines.append(f"project_directory: {yaml_string(session.project_directory)}")
     if session.models_used:
         lines.append(f"models_used: {json.dumps(session.models_used, ensure_ascii=False)}")
+    turn_models = [message.model for message in session.messages]
+    if any(turn_models):
+        lines.append(f"turn_models: {json.dumps(turn_models, ensure_ascii=False)}")
     lines.extend(["---", "", f"# {session.title}", ""])
 
     for message in session.messages:

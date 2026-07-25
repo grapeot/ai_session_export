@@ -70,6 +70,7 @@ date: "YYYY-MM-DD"
 message_count: <int>
 project_directory: "<path>"
 models_used: ["model-a", "model-b"]
+turn_models: ["model-a", "model-a"]
 ---
 # <session title>
 
@@ -89,6 +90,7 @@ Field rules:
 - `message_count` is the count of exported turns (after noise filtering).
 - `project_directory` is emitted only when non-empty (Antigravity and Second Mind never set it).
 - `models_used` is emitted only when non-empty; Antigravity leaves it empty because model identity is not exposed in its transcript steps.
+- `turn_models` is emitted when at least one turn has attributable model identity. It is a JSON array aligned one-to-one with all rendered turn sections, uses `null` for unknown entries, and is omitted when every entry is unknown. Consumers must not infer per-turn attribution from `models_used`.
 - Each turn header is `## User` or `## Assistant`. When a per-turn timestamp is known, it is appended as `[HH:MM]` in local time.
 - The file is single-trailing-newline terminated; trailing whitespace is stripped from each message body.
 

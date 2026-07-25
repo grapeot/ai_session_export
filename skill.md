@@ -63,9 +63,10 @@ source: opencode
 session_id: "ses_abc123"
 title: "Debug websocket reconnection"
 date: "2026-06-29"
-message_count: 8
+message_count: 2
 project_directory: "/home/user/project"
 models_used: ["claude-sonnet-4.6"]
+turn_models: ["claude-sonnet-4.6", "claude-sonnet-4.6"]
 ---
 # Debug websocket reconnection
 
@@ -79,7 +80,10 @@ I'll examine the reconnection handler...
 ```
 
 Frontmatter fields: `source`, `session_id`, `title`, `date`, `message_count`,
-optional `project_directory`, optional `models_used`.
+optional `project_directory`, optional `models_used`, and optional `turn_models`.
+`turn_models` is a JSON array aligned one-to-one with the rendered turn sections;
+unknown entries are `null`. Do not infer turn attribution from session-level
+`models_used`.
 
 ## Source Data Locations
 

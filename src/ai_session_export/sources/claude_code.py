@@ -107,6 +107,7 @@ def parse_claude_session_file(file_path: Path, history_titles: dict[str, list[tu
     cwd = ""
     models: set[str] = set()
     messages: list[MessageTurn] = []
+    pending_user_turns: list[int] = []
     first_user_text: str | None = None
     started_at: date | None = None
     latest_timestamp_ms = 0
@@ -136,6 +137,7 @@ def parse_claude_session_file(file_path: Path, history_titles: dict[str, list[tu
                 if first_user_text is None:
                     first_user_text = text
                 messages.append(MessageTurn(role="user", content=text, time_created=event_ts_ms))
+                pending_user_turns.append(len(messages) - 1)
                 continue
 
             if event.get("type") == "assistant":
@@ -143,9 +145,14 @@ def parse_claude_session_file(file_path: Path, history_titles: dict[str, list[tu
                 model = (message.get("model") or "").strip()
                 if model:
                     models.add(model)
+                    for index in pending_user_turns:
+                        messages[index] = messages[index]._replace(model=model)
+                pending_user_turns.clear()
                 text = _extract_text_content(message.get("content"))
                 if text:
-                    messages.append(MessageTurn(role="assistant", content=text, time_created=event_ts_ms))
+                    messages.append(
+                        MessageTurn(role="assistant", content=text, time_created=event_ts_ms, model=model or None)
+                    )
 
     if not session_id or not messages or latest_timestamp_ms == 0 or started_at is None:
         return None

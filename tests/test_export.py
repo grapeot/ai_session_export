@@ -72,6 +72,7 @@ def test_render_markdown_second_mind_shape() -> None:
     assert "\n# 应对新老板推翻路线与文档埋坑\n" in output
     assert "\n## User\n\n我是一个Scientist\n" in output
     assert "\n## Assistant\n\n这是一份为你准备的\n" in output
+    assert "turn_models:" not in output
 
 
 def test_render_markdown_opencode_shape() -> None:
@@ -83,8 +84,8 @@ def test_render_markdown_opencode_shape() -> None:
         project_directory="/home/user/project",
         models_used=["claude-opus-4-6", "claude-haiku-4-5"],
         messages=[
-            MessageTurn(role="user", content="Question"),
-            MessageTurn(role="assistant", content="Answer"),
+            MessageTurn(role="user", content="Question", model="claude-opus-4-6"),
+            MessageTurn(role="assistant", content="Answer", model="claude-opus-4-6"),
         ],
     )
     output = render_markdown(record)
@@ -92,8 +93,26 @@ def test_render_markdown_opencode_shape() -> None:
     assert 'session_id: "ses_377f8237dffe"' in output
     assert 'project_directory: "/home/user/project"' in output
     assert 'models_used: ["claude-opus-4-6", "claude-haiku-4-5"]' in output
+    assert 'turn_models: ["claude-opus-4-6", "claude-opus-4-6"]' in output
     assert "\n## User\n\nQuestion\n" in output
     assert "\n## Assistant\n\nAnswer\n" in output
+
+
+def test_render_markdown_turn_models_preserves_null_alignment() -> None:
+    record = SessionRecord(
+        source="opencode",
+        session_id="ses_mixed_models",
+        title="Mixed model fixture",
+        date="2026-02-22",
+        messages=[
+            MessageTurn(role="user", content="Question", model="gpt-example"),
+            MessageTurn(role="assistant", content="Answer"),
+        ],
+    )
+
+    output = render_markdown(record)
+
+    assert 'turn_models: ["gpt-example", null]' in output
 
 
 def test_render_markdown_with_timestamps() -> None:
@@ -215,14 +234,16 @@ def _seed_opencode_db(db_path: Path) -> None:
         ("ses_fixture", "Fixture OpenCode Session", "/home/user/project", session_time),
     )
     turns = [
-        ("user", "Tell me about pytest", None, int(datetime(2026, 6, 29, 9, 15).timestamp() * 1000)),
+        ("user", "Tell me about pytest", "fixture/model", int(datetime(2026, 6, 29, 9, 15).timestamp() * 1000)),
         ("assistant", "pytest is a testing framework", "fixture/model", int(datetime(2026, 6, 29, 9, 16).timestamp() * 1000)),
     ]
     for i, (role, text, model_id, msg_ts) in enumerate(turns):
         msg_id = f"ses_fixture_m{i}"
         data: dict = {"role": role}
         if model_id:
-            data["modelID"] = model_id
+            data["model"] = {"providerID": "fixture", "modelID": model_id} if role == "user" else None
+            if role == "assistant":
+                data["modelID"] = model_id
         conn.execute(
             "INSERT INTO message (id, session_id, time_created, data) VALUES (?,?,?,?)",
             (msg_id, "ses_fixture", msg_ts, json.dumps(data)),
@@ -290,6 +311,30 @@ def _write_claude_session(projects_root: Path, history_file: Path) -> None:
                         "message": {
                             "role": "user",
                             "content": [{"type": "tool_result", "content": "tool noise"}],
+                        },
+                        "isSidechain": False,
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "user",
+                        "timestamp": "2026-06-29T09:07:00Z",
+                        "sessionId": "claude-fixture-1",
+                        "cwd": "/home/user/project",
+                        "message": {"role": "user", "content": "Check one more fixture"},
+                        "isSidechain": False,
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "assistant",
+                        "timestamp": "2026-06-29T09:08:00Z",
+                        "sessionId": "claude-fixture-1",
+                        "cwd": "/home/user/project",
+                        "message": {
+                            "role": "assistant",
+                            "model": "claude-sonnet-4-6",
+                            "content": "The second fixture also looks good.",
                         },
                         "isSidechain": False,
                     }
@@ -418,6 +463,11 @@ def _write_codex_session(session_dir: Path, index_file: Path, *, include_followu
         events.extend(
             [
                 {
+                    "timestamp": "2026-06-29T09:04:59Z",
+                    "type": "turn_context",
+                    "payload": {"model": "fixture-codex-model-2"},
+                },
+                {
                     "timestamp": "2026-06-29T09:05:00Z",
                     "type": "event_msg",
                     "payload": {"type": "user_message", "message": "Anything else?"},
@@ -485,6 +535,7 @@ def test_opencode_export_with_fixture(tmp_path: Path) -> None:
     assert "Tell me about pytest" in text
     assert 'project_directory: "/home/user/project"' in text
     assert "fixture/model" in text  # surfaced in models_used
+    assert 'turn_models: ["fixture/model", "fixture/model"]' in text
 
 
 def test_claude_code_export_with_fixture(tmp_path: Path) -> None:
@@ -514,10 +565,67 @@ def test_claude_code_export_with_fixture(tmp_path: Path) -> None:
     assert "tool noise" not in content
     # Assistant text survives even though a tool_use item sat next to it.
     assert "The fixture looks good." in content
-    assert [m.role for m in parse_claude_session_file(
+    parsed = parse_claude_session_file(
         projects_root / "-home-user-project" / "claude-fixture-1.jsonl",
         {"claude-fixture-1": [(1711260000000, "Fixture Claude Task")]},
-    ).record.messages] == ["user", "assistant"]
+    )
+    assert parsed is not None
+    assert [m.role for m in parsed.record.messages] == ["user", "assistant", "user", "assistant"]
+    assert [m.model for m in parsed.record.messages] == [
+        "claude-opus-4-6",
+        "claude-opus-4-6",
+        "claude-sonnet-4-6",
+        "claude-sonnet-4-6",
+    ]
+    assert (
+        'turn_models: ["claude-opus-4-6", "claude-opus-4-6", "claude-sonnet-4-6", '
+        '"claude-sonnet-4-6"]' in content
+    )
+
+
+def test_claude_missing_assistant_model_does_not_leak_later_model(tmp_path: Path) -> None:
+    session_file = tmp_path / "claude-missing-model.jsonl"
+    events = [
+        {
+            "type": "user",
+            "timestamp": "2026-06-29T09:00:00Z",
+            "sessionId": "claude-missing-model",
+            "message": {"role": "user", "content": "First fixture question"},
+        },
+        {
+            "type": "assistant",
+            "timestamp": "2026-06-29T09:01:00Z",
+            "sessionId": "claude-missing-model",
+            "message": {"role": "assistant", "content": "First fixture answer"},
+        },
+        {
+            "type": "user",
+            "timestamp": "2026-06-29T09:02:00Z",
+            "sessionId": "claude-missing-model",
+            "message": {"role": "user", "content": "Second fixture question"},
+        },
+        {
+            "type": "assistant",
+            "timestamp": "2026-06-29T09:03:00Z",
+            "sessionId": "claude-missing-model",
+            "message": {
+                "role": "assistant",
+                "model": "claude-fixture-later",
+                "content": "Second fixture answer",
+            },
+        },
+    ]
+    session_file.write_text("\n".join(json.dumps(event) for event in events) + "\n", encoding="utf-8")
+
+    parsed = parse_claude_session_file(session_file, {})
+
+    assert parsed is not None
+    assert [message.model for message in parsed.record.messages] == [
+        None,
+        None,
+        "claude-fixture-later",
+        "claude-fixture-later",
+    ]
 
 
 def test_antigravity_export_with_fixture(tmp_path: Path) -> None:
@@ -597,6 +705,11 @@ def test_codex_export_with_fixture_and_incremental_update(tmp_path: Path) -> Non
     parsed = parse_codex_session_file(session_file, {"codex-fixture-1": "Fixture Codex Task"})
     assert parsed is not None
     assert [message.role for message in parsed.record.messages] == ["user", "assistant"]
+    assert [message.model for message in parsed.record.messages] == [
+        "fixture-codex-model",
+        "fixture-codex-model",
+    ]
+    assert 'turn_models: ["fixture-codex-model", "fixture-codex-model"]' in text
 
     unchanged = export_codex(
         output_dir,
@@ -621,7 +734,47 @@ def test_codex_export_with_fixture_and_incremental_update(tmp_path: Path) -> Non
     )
     assert updated["exported"] == 1
     assert len(list(output_dir.glob("*.md"))) == 1
-    assert "No further issues." in files[0].read_text(encoding="utf-8")
+    updated_text = files[0].read_text(encoding="utf-8")
+    assert "No further issues." in updated_text
+    assert (
+        'turn_models: ["fixture-codex-model", "fixture-codex-model", '
+        '"fixture-codex-model-2", "fixture-codex-model-2"]' in updated_text
+    )
+
+
+def test_codex_model_context_after_user_backfills_turn(tmp_path: Path) -> None:
+    session_file = tmp_path / "rollout-2026-06-29T09-00-00-codex-delayed.jsonl"
+    events = [
+        {
+            "timestamp": "2026-06-29T09:00:00Z",
+            "type": "session_meta",
+            "payload": {"id": "codex-delayed", "cwd": "/home/user/project"},
+        },
+        {
+            "timestamp": "2026-06-29T09:00:01Z",
+            "type": "event_msg",
+            "payload": {"type": "user_message", "message": "Review the delayed fixture"},
+        },
+        {
+            "timestamp": "2026-06-29T09:00:02Z",
+            "type": "turn_context",
+            "payload": {"model": "fixture-delayed-model"},
+        },
+        {
+            "timestamp": "2026-06-29T09:00:03Z",
+            "type": "event_msg",
+            "payload": {"type": "agent_message", "message": "Reviewed."},
+        },
+    ]
+    session_file.write_text("\n".join(json.dumps(event) for event in events) + "\n", encoding="utf-8")
+
+    parsed = parse_codex_session_file(session_file, {})
+
+    assert parsed is not None
+    assert [message.model for message in parsed.record.messages] == [
+        "fixture-delayed-model",
+        "fixture-delayed-model",
+    ]
 
 
 # --------------------------------------------------------------------------- #

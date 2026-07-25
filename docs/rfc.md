@@ -22,6 +22,7 @@ class MessageTurn(NamedTuple):
     role: str            # "user" or "assistant"
     content: str
     time_created: int | None  # ms epoch of the turn, if known
+    model: str | None    # target/responder model, if attributable
 
 class SessionRecord(NamedTuple):
     source: str          # e.g. "antigravity"
@@ -33,13 +34,13 @@ class SessionRecord(NamedTuple):
     models_used: list[str] = []
 ```
 
-`NamedTuple` is chosen over `dataclass` for its immutability and trivial serialisability — a parsed session is a value object that should never be mutated between parsing and rendering. Adapters are free to carry private intermediate types (for example `ParsedAntigravitySession` and `ParsedClaudeSession`) that bundle a `SessionRecord` together with a source-specific cursor field, but those intermediate types never cross into the renderer.
+`NamedTuple` is chosen over `dataclass` for its immutability and trivial serialisability — a parsed session is a value object that should never be mutated between parsing and rendering. Adapters may replace an immutable turn while resolving delayed attribution, such as Claude's next assistant response or Codex's following turn context. Adapters are free to carry private intermediate types (for example `ParsedAntigravitySession` and `ParsedClaudeSession`) that bundle a `SessionRecord` together with a source-specific cursor field, but those intermediate types never cross into the renderer.
 
 ## Shared Renderer
 
 `markdown.py::render_markdown(session: SessionRecord) -> str` is the single function that turns a `SessionRecord` into the final file bytes. Every adapter calls it; none writes Markdown directly. This guarantees the Markdown Output Contract (see `prd.md`) is enforced in exactly one place.
 
-The renderer is a straight-line builder: it assembles the frontmatter lines (conditionally adding `project_directory` and `models_used`), then iterates `messages` emitting `## User` / `## Assistant` headers with an optional `[HH:MM]` suffix derived from `time_created` via `utils.ms_to_hhmm`. All string frontmatter values pass through `utils.yaml_string`, which JSON-quotes them so YAML-special characters cannot break the block.
+The renderer is a straight-line builder: it assembles the frontmatter lines (conditionally adding `project_directory`, `models_used`, and `turn_models`), then iterates `messages` emitting `## User` / `## Assistant` headers with an optional `[HH:MM]` suffix derived from `time_created` via `utils.ms_to_hhmm`. `turn_models` is a JSON array aligned one-to-one with those sections; unknown entries are `null`, and the field is omitted when every turn is unknown. This extends the contract without changing headings or message bodies, so older consumers can ignore the new field safely. All string frontmatter values pass through `utils.yaml_string`, which JSON-quotes them so YAML-special characters cannot break the block.
 
 ## Source Adapters
 
@@ -48,9 +49,9 @@ Each adapter follows the same contract: a function `export_<name>(output_dir, st
 | Adapter | Data Source | Parsing Approach |
 |---|---|---|
 | `second_mind.py` | A single JSON array export at `second_mind_export.json`. | `json.loads` the whole file; each element is one conversation with `title`, `created_at`, and a `messages` list of `{role, content}`. Drops any non-`user`/`assistant` role. Incremental cursor is the count of conversations already seen (`last_export_count`). |
-| `opencode.py` | SQLite database at `~/.local/share/opencode/opencode.db`, opened read-only via the `file:...?mode=ro` URI. | Joins `session` -> `message` -> `part`. Text parts (`json_extract(data, '$.type') == 'text'`) are concatenated per message; model ids are collected from assistant messages. Sessions with zero user turns are skipped. Noise titles (sub-agent chatter) are filtered via `utils.should_skip_session`. Cursor is `session.time_created` (`last_session_time`). |
-| `claude_code.py` | JSONL session files under `~/.claude/projects/**/*.jsonl`, plus `history.jsonl` for human-readable titles. | Iterates session files (excluding anything under a `subagents/` path). Each line is one event; `user` and `assistant` events produce turns, `isSidechain` events are skipped. Assistant content is an array that may mix `text` and `tool_use` items — only `text` items survive. `tool_result` user messages produce empty text and are dropped. Titles are chosen from the history file when a meaningful `display` exists, otherwise from the first user message. Cursor is the max event timestamp (`last_timestamp`). |
-| `codex.py` | Rollout JSONL under `~/.codex/sessions/` and `~/.codex/archived_sessions/`, plus `session_index.jsonl` for titles. | Keeps only `event_msg.user_message` and `event_msg.agent_message`. It drops developer instructions, reasoning, tool calls/results, token accounting, and world state. `session_meta` supplies id/cwd and `turn_context` supplies model ids. Per-session state updates one stable Markdown file as an active rollout grows; unchanged source mtimes skip reparsing. |
+| `opencode.py` | SQLite database at `~/.local/share/opencode/opencode.db`, opened read-only via the `file:...?mode=ro` URI. | Joins `session` -> `message` -> `part`. Text parts (`json_extract(data, '$.type') == 'text'`) are concatenated per message; each message's native model metadata is retained on its turn. Sessions with zero user turns are skipped. Noise titles (sub-agent chatter) are filtered via `utils.should_skip_session`. Cursor is `session.time_created` (`last_session_time`). |
+| `claude_code.py` | JSONL session files under `~/.claude/projects/**/*.jsonl`, plus `history.jsonl` for human-readable titles. | Iterates session files (excluding anything under a `subagents/` path). Each line is one event; `user` and `assistant` events produce turns, `isSidechain` events are skipped. Assistant content is an array that may mix `text` and `tool_use` items — only `text` items survive. `tool_result` user messages produce empty text and are dropped. A following assistant model is assigned to pending user turns. Titles are chosen from the history file when a meaningful `display` exists, otherwise from the first user message. Cursor is the max event timestamp (`last_timestamp`). |
+| `codex.py` | Rollout JSONL under `~/.codex/sessions/` and `~/.codex/archived_sessions/`, plus `session_index.jsonl` for titles. | Keeps only `event_msg.user_message` and `event_msg.agent_message`. It drops developer instructions, reasoning, tool calls/results, token accounting, and world state. `session_meta` supplies id/cwd and `turn_context` supplies the current model, including delayed backfill when context follows a user event. Per-session state updates one stable Markdown file as an active rollout grows; unchanged source mtimes skip reparsing. |
 | `antigravity.py` | JSONL transcripts at `~/.gemini/antigravity-ide/brain/*/.system_generated/logs/transcript_full.jsonl`. | One JSON object per line per "step". See the dedicated section below. Cursor is the max step timestamp (`last_timestamp`). |
 
 ## Antigravity Adapter Design

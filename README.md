@@ -46,11 +46,12 @@ Each session is exported as a Markdown file with YAML frontmatter:
 
 ```markdown
 ---
-source: antigravity
-session_id: "8a425409-..."
+source: opencode
+session_id: "ses-example"
 title: "Fix the bug in auth.py"
 date: "2026-06-29"
 message_count: 3
+turn_models: ["gpt-example", "gpt-example", "gpt-example"]
 ---
 # Fix the bug in auth.py
 
@@ -66,6 +67,11 @@ I'll look at the auth.py file first.
 
 The bug is on line 42.
 ```
+
+When a source can attribute models per turn, `turn_models` is a JSON array aligned
+one-to-one with the rendered `User` and `Assistant` sections. Unknown entries are
+`null`; the field is omitted when every turn is unknown. `models_used` remains a
+session-level inventory and must not be used to guess per-turn attribution.
 
 ## Installation as a Coding Agent Skill
 

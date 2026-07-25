@@ -66,6 +66,8 @@ def parse_codex_session_file(file_path: Path, titles: dict[str, str]) -> ParsedC
     cwd = ""
     models: set[str] = set()
     messages: list[MessageTurn] = []
+    current_model: str | None = None
+    pending_user_turns: list[int] = []
     first_user_text = ""
     started_at: date | None = None
     latest_timestamp_ms = 0
@@ -99,7 +101,11 @@ def parse_codex_session_file(file_path: Path, titles: dict[str, str]) -> ParsedC
             if event_type == "turn_context":
                 model = str(payload.get("model") or "").strip()
                 if model:
+                    current_model = model
                     models.add(model)
+                    for index in pending_user_turns:
+                        messages[index] = messages[index]._replace(model=model)
+                    pending_user_turns.clear()
                 cwd = str(payload.get("cwd") or cwd)
                 continue
 
@@ -113,11 +119,17 @@ def parse_codex_session_file(file_path: Path, titles: dict[str, str]) -> ParsedC
                     continue
                 if not first_user_text:
                     first_user_text = text
-                messages.append(MessageTurn(role="user", content=text, time_created=event_ts_ms))
+                messages.append(
+                    MessageTurn(role="user", content=text, time_created=event_ts_ms, model=current_model)
+                )
+                pending_user_turns.append(len(messages) - 1)
             elif payload_type == "agent_message":
                 text = str(payload.get("message") or "").strip()
                 if text:
-                    messages.append(MessageTurn(role="assistant", content=text, time_created=event_ts_ms))
+                    messages.append(
+                        MessageTurn(role="assistant", content=text, time_created=event_ts_ms, model=current_model)
+                    )
+                pending_user_turns.clear()
 
     if not session_id or not first_user_text or not messages or started_at is None:
         return None

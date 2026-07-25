@@ -7,6 +7,7 @@ class MessageTurn(NamedTuple):
     role: str
     content: str
     time_created: int | None = None  # ms epoch of the turn's first message, if known
+    model: str | None = None  # target/responder model for this turn, if attributable
 
 
 class SessionRecord(NamedTuple):
