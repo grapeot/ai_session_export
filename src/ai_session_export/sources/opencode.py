@@ -16,7 +16,7 @@ def load_opencode_session_messages(conn: sqlite3.Connection, session_id: str) ->
         """
         SELECT id,
                COALESCE(json_extract(data, '$.role'), ''),
-               COALESCE(json_extract(data, '$.modelID'), ''),
+               COALESCE(json_extract(data, '$.model.modelID'), json_extract(data, '$.modelID'), ''),
                time_created
         FROM message
         WHERE session_id = ?
@@ -47,11 +47,12 @@ def load_opencode_session_messages(conn: sqlite3.Connection, session_id: str) ->
         if not content:
             continue
         turn_time = int(time_created) if time_created is not None else None
-        messages.append(MessageTurn(role=role, content=content, time_created=turn_time))
+        normalized_model = str(model_id).strip() or None
+        messages.append(MessageTurn(role=role, content=content, time_created=turn_time, model=normalized_model))
         if role == "user":
             user_count += 1
-        if role == "assistant" and model_id:
-            models.add(model_id)
+        if normalized_model:
+            models.add(normalized_model)
 
     return messages, sorted(models), user_count
 
