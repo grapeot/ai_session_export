@@ -15,6 +15,7 @@ Pure-logic tests with no filesystem or database I/O beyond `tmp_path`. These run
 | `test_render_markdown_turn_models_preserves_null_alignment` | Mixed known/unknown turn attribution renders a position-preserving JSON array with `null`. |
 | `test_render_markdown_with_timestamps` | The `[HH:MM]` suffix appears on `## User` / `## Assistant` headers when `time_created` is set, and is absent when it is not; the frontmatter `date` is independent of per-turn times. |
 | `test_state_load_save_roundtrip` | A missing state file yields `DEFAULT_STATE`; a mutated state round-trips through `save_state` / `load_state`; per-source defaults for untouched sources are preserved on reload; extra top-level keys survive. |
+| `test_state_loading_legacy_shape_does_not_mutate_defaults` | Loading an old state file deep-copies the new nested Antigravity surface default so runtime mutations cannot contaminate `DEFAULT_STATE`. |
 | `test_state_defaults` | A fresh state (loaded from a non-existent path) has zero-valued cursors for every source. |
 | `test_unique_output_path` | The first call yields `YYYYMMDD_title.md`; a second collision yields a `_2` suffix; a third yields `_3`. |
 | `test_yaml_string` | Plain strings, embedded double quotes, CJK, and YAML-significant characters (`a: b`) are all JSON-quoted so they stay valid inside the frontmatter block. |
@@ -30,6 +31,13 @@ Each adapter is exercised against a synthetic fixture built inside `tmp_path`. T
 | `test_claude_code_export_with_fixture` | A synthetic `projects/` tree with one `.jsonl` session file plus a `history.jsonl` providing a human title. The session includes two model phases, mixed assistant content, and a `tool_result` user message. | The history title is chosen over the raw first-user-text fallback; the `tool_result` user message is dropped; assistant text survives; each user turn receives its following assistant model without attribution bleeding across the model transition. |
 | `test_claude_missing_assistant_model_does_not_leak_later_model` | Two Claude turns where the first assistant omits model metadata and the second supplies it. | The first user/assistant pair remains `null`; the later model is attributed only to its own pair. |
 | `test_antigravity_export_with_fixture` | A synthetic brain directory with one session whose `transcript_full.jsonl` contains `USER_INPUT`, `CONVERSATION_HISTORY`, two `PLANNER_RESPONSE`, and a `CODE_ACTION` step. | Frontmatter `source`/`session_id`/`date`/`message_count` are correct; title is derived from the inner `<USER_REQUEST>` text; XML wrappers (`<USER_REQUEST>`, `<ADDITIONAL_METADATA>`) are stripped; only one `## User` and two `## Assistant` sections appear; tool-call names (`view_file`) are absent. |
+| `test_antigravity_exports_all_surfaces_incrementally` | Three synthetic roots use the same session id but distinct 2.0/IDE/CLI requests. | All surfaces export with stable `surface` metadata and isolated state; unchanged reruns write nothing; appending a CLI turn rewrites one existing output without creating a duplicate. |
+| `test_antigravity_malformed_session_does_not_block_other_surfaces` | One 2.0 transcript starts with invalid JSON while an IDE transcript is valid. | The valid surface exports, the failed session records line-level retry state, and repairing the file exports it on the next run. |
+| `test_antigravity_valid_json_with_wrong_shape_is_isolated` | One transcript contains a JSON array instead of a step object. | Schema-invalid JSON is isolated like syntax-invalid JSON and does not block a valid CLI session. |
+| `test_antigravity_invalid_field_type_is_isolated_and_state_is_saved` | One transcript contains a non-string content field while a CLI transcript is valid. | The invalid session remains retryable, the valid session exports, and both outcomes persist through `run_export`. |
+| `test_antigravity_legacy_cursor_applies_only_to_ide` | A legacy global timestamp is newer than synthetic 2.0 and IDE sessions. | The IDE session is imported into state without duplicate output, while the previously uncovered 2.0 session still exports. |
+| `test_antigravity_legacy_cursor_migration_waits_for_unfiltered_run` | The first migration run has a date filter that excludes the legacy IDE fixture. | Migration remains pending until an unfiltered run can account for the old IDE session. |
+| `test_antigravity_dry_run_does_not_mutate_state` | A populated nested surface state and one new IDE fixture. | Dry-run reports the export without creating an output directory or mutating any in-memory state. |
 | `test_codex_export_with_fixture_and_incremental_update` | A synthetic rollout plus `session_index.jsonl`, including user/agent messages, reasoning, tool output, system metadata, and a model switch before a follow-up turn. | Only user/agent narrative survives; title/cwd/per-turn model metadata are preserved across the switch; unchanged reruns export zero files; appending turns updates the original Markdown file instead of creating a suffix duplicate. |
 | `test_codex_model_context_after_user_backfills_turn` | A synthetic rollout where `turn_context` follows the user event. | Delayed context backfills the pending user turn and applies to its assistant response. |
 
@@ -37,7 +45,8 @@ Each adapter is exercised against a synthetic fixture built inside `tmp_path`. T
 
 | Test | What it covers |
 |---|---|
-| `test_cli_run_export_all_sources` (marked `integration`) | Calls `run_export("all")` with all five synthetic fixtures wired into `tmp_path`, then asserts every source appears, every source writes Markdown, and all persisted cursors including Codex per-session state are refreshed. |
+| `test_cli_run_export_all_sources` (marked `integration`) | Calls `run_export("all")` with all five synthetic fixtures wired into `tmp_path`, then asserts every source appears, every source writes Markdown, and persisted state includes Antigravity and Codex per-session status. |
+| `test_cli_main_reports_partial_antigravity_failure` | Injects a synthetic adapter warning and verifies the CLI prints `failed=1`, writes a privacy-safe surface/line diagnostic to stderr, and exits with status 1. |
 
 This is the only test that exercises `cli.py`'s dispatch and state-persistence logic end to end; it is the regression guard for the "adding a new source" checklist in `AGENTS.md`.
 
@@ -47,7 +56,7 @@ These tests run against the developer's real local data and are **opt-in**. They
 
 | Test | What it covers |
 |---|---|
-| `test_live_antigravity_export` | Skips if the default brain directory does not exist. Runs a `--dry-run` scan first (asserts no files are written), then a real export over the last 7 days. Asserts the number of written files equals `result["exported"]` and that a sample file carries `source: antigravity`. Skips gracefully if there are no recent sessions. |
+| `test_live_antigravity_export` | Discovers whichever of the three default Antigravity surface roots exist. Runs a `--dry-run` scan first, then a real export over the last 7 days. Asserts the number of written files equals `result["exported"]` and that a sample carries `source: antigravity`. Skips gracefully if there are no recent sessions. |
 | `test_live_opencode_export` | Skips if the default OpenCode database does not exist. Same dry-run-then-real pattern over the last 7 days. Asserts file count matches `exported` and that a sample carries `source: opencode`. |
 | `test_live_codex_export` | Skips if no default Codex session directory exists. Exports only the last 7 days to `tmp_path`, checks file counts, and verifies `source: codex` without printing transcript content. |
 

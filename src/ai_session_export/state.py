@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
@@ -10,7 +11,7 @@ DEFAULT_STATE = {
     "opencode": {"last_session_time": 0},
     "claude_code": {"last_timestamp": 0},
     "codex": {"sessions": {}},
-    "antigravity": {"last_timestamp": 0},
+    "antigravity": {"last_timestamp": 0, "legacy_cursor_migrated": False, "surfaces": {}},
 }
 
 
@@ -22,7 +23,7 @@ def load_state(state_file: Path) -> dict[str, Any]:
     for source, defaults in DEFAULT_STATE.items():
         state.setdefault(source, {})
         for key, value in defaults.items():
-            state[source].setdefault(key, value)
+            state[source].setdefault(key, deepcopy(value))
     return state
 
 

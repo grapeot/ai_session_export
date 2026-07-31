@@ -32,6 +32,7 @@ class SessionRecord(NamedTuple):
     messages: list[MessageTurn]
     project_directory: str = ""
     models_used: list[str] = []
+    surface: str = ""      # optional product surface, currently Antigravity only
 ```
 
 `NamedTuple` is chosen over `dataclass` for its immutability and trivial serialisability — a parsed session is a value object that should never be mutated between parsing and rendering. Adapters may replace an immutable turn while resolving delayed attribution, such as Claude's next assistant response or Codex's following turn context. Adapters are free to carry private intermediate types (for example `ParsedAntigravitySession` and `ParsedClaudeSession`) that bundle a `SessionRecord` together with a source-specific cursor field, but those intermediate types never cross into the renderer.
@@ -40,7 +41,7 @@ class SessionRecord(NamedTuple):
 
 `markdown.py::render_markdown(session: SessionRecord) -> str` is the single function that turns a `SessionRecord` into the final file bytes. Every adapter calls it; none writes Markdown directly. This guarantees the Markdown Output Contract (see `prd.md`) is enforced in exactly one place.
 
-The renderer is a straight-line builder: it assembles the frontmatter lines (conditionally adding `project_directory`, `models_used`, and `turn_models`), then iterates `messages` emitting `## User` / `## Assistant` headers with an optional `[HH:MM]` suffix derived from `time_created` via `utils.ms_to_hhmm`. `turn_models` is a JSON array aligned one-to-one with those sections; unknown entries are `null`, and the field is omitted when every turn is unknown. This extends the contract without changing headings or message bodies, so older consumers can ignore the new field safely. All string frontmatter values pass through `utils.yaml_string`, which JSON-quotes them so YAML-special characters cannot break the block.
+The renderer is a straight-line builder: it assembles the frontmatter lines (conditionally adding `surface`, `project_directory`, `models_used`, and `turn_models`), then iterates `messages` emitting `## User` / `## Assistant` headers with an optional `[HH:MM]` suffix derived from `time_created` via `utils.ms_to_hhmm`. `surface` is currently emitted only for Antigravity and distinguishes `"2"`, `"ide"`, and `"cli"` without changing the stable top-level `source: antigravity`. `turn_models` is a JSON array aligned one-to-one with those sections; unknown entries are `null`, and the field is omitted when every turn is unknown. These optional fields extend the contract without changing headings or message bodies, so older consumers can ignore them safely. All string frontmatter values pass through `utils.yaml_string`, which JSON-quotes them so YAML-special characters cannot break the block.
 
 ## Source Adapters
 
@@ -52,11 +53,19 @@ Each adapter follows the same contract: a function `export_<name>(output_dir, st
 | `opencode.py` | SQLite database at `~/.local/share/opencode/opencode.db`, opened read-only via the `file:...?mode=ro` URI. | Joins `session` -> `message` -> `part`. Text parts (`json_extract(data, '$.type') == 'text'`) are concatenated per message; each message's native model metadata is retained on its turn. Sessions with zero user turns are skipped. Noise titles (sub-agent chatter) are filtered via `utils.should_skip_session`. Cursor is `session.time_created` (`last_session_time`). |
 | `claude_code.py` | JSONL session files under `~/.claude/projects/**/*.jsonl`, plus `history.jsonl` for human-readable titles. | Iterates session files (excluding anything under a `subagents/` path). Each line is one event; `user` and `assistant` events produce turns, `isSidechain` events are skipped. Assistant content is an array that may mix `text` and `tool_use` items — only `text` items survive. `tool_result` user messages produce empty text and are dropped. A following assistant model is assigned to pending user turns. Titles are chosen from the history file when a meaningful `display` exists, otherwise from the first user message. Cursor is the max event timestamp (`last_timestamp`). |
 | `codex.py` | Rollout JSONL under `~/.codex/sessions/` and `~/.codex/archived_sessions/`, plus `session_index.jsonl` for titles. | Keeps only `event_msg.user_message` and `event_msg.agent_message`. It drops developer instructions, reasoning, tool calls/results, token accounting, and world state. `session_meta` supplies id/cwd and `turn_context` supplies the current model, including delayed backfill when context follows a user event. Per-session state updates one stable Markdown file as an active rollout grows; unchanged source mtimes skip reparsing. |
-| `antigravity.py` | JSONL transcripts at `~/.gemini/antigravity-ide/brain/*/.system_generated/logs/transcript_full.jsonl`. | One JSON object per line per "step". See the dedicated section below. Cursor is the max step timestamp (`last_timestamp`). |
+| `antigravity.py` | JSONL transcripts under the Antigravity 2.0, IDE, and CLI brain roots. | One JSON object per line per "step". See the dedicated section below. Incremental state is isolated by surface and session, using source mtime/size fingerprints and stable output filenames. |
 
 ## Antigravity Adapter Design
 
-The Antigravity IDE stores its brain state under `~/.gemini/antigravity-ide/brain/`. Each subdirectory is one session, named by a UUID, and (in current versions) contains a `.system_generated/logs/` directory whose `transcript_full.jsonl` is the only file with human-readable text. Other artefacts in a session directory (`.pb` protobuf files, snapshots, etc.) are binary and have no published schema; the adapter ignores them.
+Antigravity currently exposes three independently installed product surfaces with separate local namespaces:
+
+| Surface | Default brain root | Product boundary |
+|---|---|---|
+| `2` | `~/.gemini/antigravity/brain/` | Antigravity 2.0 standalone desktop command center. This namespace was also used by the pre-2.0 integrated IDE, so old files may have legacy provenance. |
+| `ide` | `~/.gemini/antigravity-ide/brain/` | Standalone Antigravity IDE after the product split. |
+| `cli` | `~/.gemini/antigravity-cli/brain/` | Independent terminal client launched with `agy`. |
+
+Each subdirectory is one session, named by an opaque id, and contains a `.system_generated/logs/` directory whose `transcript_full.jsonl` is the only file with human-readable dialogue. Other artefacts in a session directory (`.pb` protobuf files, snapshots, etc.) are binary and have no published schema; the adapter ignores them. The three surfaces share one output directory and `source: antigravity`, while the optional `surface` frontmatter field preserves their product identity.
 
 The transcript is JSONL, one object per "step". Each step has the keys `step_index`, `source`, `type`, `status`, `created_at` (ISO 8601), and optionally `content` and `tool_calls`. The adapter keeps only two step kinds and drops everything else:
 
@@ -87,6 +96,8 @@ Other adapter decisions:
 - `models_used` is always an empty list for Antigravity — model identity is not surfaced in the transcript steps.
 - The session `date` is the calendar date of the earliest step that has a parseable `created_at`.
 - A session with no kept messages, a zero `latest_timestamp_ms`, or no `started_at` is skipped entirely.
+- Every JSONL line must decode to a JSON object with string fields where required. Syntax, shape, and field-type errors are isolated to that session and returned as privacy-safe structured warnings containing only the surface, line number, and error summary.
+- A malformed session is recorded with `status: failed`, is retried on the next run, and never blocks valid sessions from other surfaces. The CLI reports the failure count and exits non-zero after successful sessions and state have been written.
 
 ## Incremental Export
 
@@ -97,7 +108,23 @@ A single JSON state file (default `.export_state.json` next to the export root) 
   "second_mind": {"last_export_count": 12},
   "opencode": {"last_session_time": 1719648000000},
   "claude_code": {"last_timestamp": 1719648000000},
-  "antigravity": {"last_timestamp": 1719648000000},
+  "antigravity": {
+    "last_timestamp": 1719648000000,
+    "legacy_cursor_migrated": true,
+    "surfaces": {
+      "ide": {
+        "sessions": {
+          "example-id": {
+            "status": "complete",
+            "latest_timestamp": 1719648000000,
+            "output_file": "20260629_example.md",
+            "source_mtime_ns": 123,
+            "source_size": 456
+          }
+        }
+      }
+    }
+  },
   "codex": {"sessions": {"example-id": {"latest_timestamp": 1719648000000, "output_file": "20260629_example.md", "source_mtime_ns": 123}}}
 }
 ```
@@ -106,8 +133,11 @@ Each adapter carries its own cursor semantics because the sources expose time di
 
 - **Second Mind** has no per-conversation timestamp exposed reliably, so the cursor is a count of conversations already exported; on each run it exports only the conversations beyond that count.
 - **OpenCode** uses `session.time_created` (ms epoch) and re-queries rows with `time_created > last_session_time`.
-- **Claude Code** and **Antigravity** both reduce the transcript to a single `latest_timestamp_ms` (max over all kept events/steps) and skip sessions whose latest timestamp is at or before the cursor.
+- **Claude Code** reduces each transcript to a single `latest_timestamp_ms` and compares it with a source-level cursor.
+- **Antigravity** keeps independent per-session state inside each product surface. Unchanged mtime/size fingerprints skip reparsing, changed sessions rewrite their prior output file, failed sessions remain retryable, and identical session ids on different surfaces do not collide in state.
 - **Codex** uses per-session state because active rollout files keep growing and archived sessions can move between directories. The adapter rewrites the same output file when a session changes and skips unchanged files by source mtime.
+
+The deprecated `antigravity.last_timestamp` is retained only as a one-time migration input for existing installations. Because the old adapter scanned only the IDE, that cursor is applied only to the `ide` surface. Migration completes only on an unfiltered run that scanned at least one IDE transcript without parse failures; 2.0 and CLI sessions are never suppressed by the legacy cursor.
 
 Two correctness properties are enforced uniformly:
 
@@ -130,9 +160,9 @@ Flags:
 | `--since-date YYYY-MM-DD` | Drop sessions whose date is before the given day. |
 | `--base-dir` | Override the export root (default: `~/.local/share/ai-session-export`). |
 | `--state-file` | Override the state cursor file. |
-| `--second-mind-json`, `--opencode-db`, `--antigravity-dir`, `--codex-dir`, `--codex-session-index` | Override each source's input location. |
+| `--second-mind-json`, `--opencode-db`, `--antigravity-dir`, `--codex-dir`, `--codex-session-index` | Override each source's input location. `--antigravity-dir` preserves the original single-root interface and treats that root as an IDE-compatible surface; omitting it scans all three defaults. |
 
-After each adapter runs, `main()` prints one summary line per source (`exported=N scanned=N`, or `exported=N total=N` for Second Mind).
+After each adapter runs, `main()` prints one summary line per source (`exported=N scanned=N`, or `exported=N total=N` for Second Mind). Antigravity adds `failed=N` when any session could not be parsed, then exits non-zero after persisting successful work so cron can distinguish partial success from a clean run.
 
 ## Test Strategy
 
@@ -140,7 +170,7 @@ The suite is split into four tiers, ordered from fastest/most-isolated to slowes
 
 1. **Unit tests** — pure functions with no I/O (`sanitize_filename`, `should_skip_session`, `render_markdown`, `yaml_string`, `unique_output_path`, `load_state`/`save_state`).
 2. **Source-adapter tests** — each adapter exercised against a synthetic fixture built in `tmp_path` (a hand-written JSONL/JSON file or a seeded SQLite database).
-3. **Integration test** — a single `run_export("all")` call that wires all five adapters into temp paths and asserts state is persisted with refreshed cursors.
+3. **Integration test** — a single `run_export("all")` call that wires all five adapters into temp paths and asserts state is persisted with refreshed cursors and Antigravity per-session status.
 4. **Live end-to-end tests** — opt-in via `AI_SESSION_EXPORT_LIVE=1`, run against the real local data on the developer's machine with a 7-day `--since-date` window. Skipped automatically in CI.
 
 See `docs/test.md` for the full per-test breakdown.
