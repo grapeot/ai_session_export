@@ -10,11 +10,17 @@ def render_markdown(session: SessionRecord) -> str:
     lines: list[str] = [
         "---",
         f"source: {session.source}",
-        f"session_id: {yaml_string(session.session_id)}",
-        f"title: {yaml_string(session.title)}",
-        f"date: {yaml_string(session.date)}",
-        f"message_count: {len(session.messages)}",
     ]
+    if session.surface:
+        lines.append(f"surface: {yaml_string(session.surface)}")
+    lines.extend(
+        [
+            f"session_id: {yaml_string(session.session_id)}",
+            f"title: {yaml_string(session.title)}",
+            f"date: {yaml_string(session.date)}",
+            f"message_count: {len(session.messages)}",
+        ]
+    )
     if session.project_directory:
         lines.append(f"project_directory: {yaml_string(session.project_directory)}")
     if session.models_used:

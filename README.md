@@ -9,7 +9,9 @@ Export AI coding session transcripts from multiple tools into a unified Markdown
 | OpenCode | `~/.local/share/opencode/opencode.db` |
 | Claude Code | `~/.claude/projects/**/*.jsonl` |
 | Codex | `~/.codex/sessions/**/*.jsonl`, `~/.codex/archived_sessions/*.jsonl` |
-| Google Antigravity | `~/.gemini/antigravity-ide/brain/*/.system_generated/logs/transcript_full.jsonl` |
+| Google Antigravity 2.0 | `~/.gemini/antigravity/brain/*/.system_generated/logs/transcript_full.jsonl` |
+| Google Antigravity IDE | `~/.gemini/antigravity-ide/brain/*/.system_generated/logs/transcript_full.jsonl` |
+| Google Antigravity CLI | `~/.gemini/antigravity-cli/brain/*/.system_generated/logs/transcript_full.jsonl` |
 | Second Mind | `second_mind_export.json` |
 
 ## Quick Start
@@ -39,6 +41,11 @@ By default, output and incremental state are stored under
 `~/.local/share/ai-session-export/`. Use `--base-dir` and `--state-file` to
 target another private archive. Never write real session exports into a public
 repository.
+
+`--source antigravity` scans all three Antigravity surfaces by default. They share
+the `antigravity/` output directory and `source: antigravity`, while optional
+frontmatter `surface` identifies `"2"`, `"ide"`, or `"cli"`. The legacy
+`--antigravity-dir /path/to/brain` override scans one IDE-compatible root.
 
 ## Output Format
 
@@ -72,6 +79,8 @@ When a source can attribute models per turn, `turn_models` is a JSON array align
 one-to-one with the rendered `User` and `Assistant` sections. Unknown entries are
 `null`; the field is omitted when every turn is unknown. `models_used` remains a
 session-level inventory and must not be used to guess per-turn attribution.
+Antigravity records additionally include `surface: "2"`, `surface: "ide"`, or
+`surface: "cli"`.
 
 ## Installation as a Coding Agent Skill
 

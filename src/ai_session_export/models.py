@@ -18,3 +18,4 @@ class SessionRecord(NamedTuple):
     messages: list[MessageTurn]
     project_directory: str = ""
     models_used: list[str] = []
+    surface: str = ""

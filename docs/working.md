@@ -1,5 +1,13 @@
 ## Changelog
 
+### 2026-07-31
+
+- Expanded the single Antigravity adapter to scan Antigravity 2.0, Antigravity IDE, and Antigravity CLI while preserving the stable `source: antigravity` contract and adding optional `surface` provenance.
+- Replaced the Antigravity global timestamp cursor with per-surface, per-session source fingerprints, stable output filenames, and parse status. The legacy cursor migrates only the IDE records it historically covered.
+- Isolated malformed JSON and wrong-shape JSON to the affected session, retained retryable failure state, surfaced partial failures to the CLI, and kept successful sessions exportable in the same run.
+- Treated invalid JSON field types as retryable session failures and kept CLI diagnostics free of session identifiers and local transcript paths.
+- Added synthetic coverage for all three surfaces, identical cross-surface session ids, incremental rewrites, malformed-session repair, legacy state migration, mutable-default isolation, and dry-run state immutability.
+
 ### 2026-07-25
 
 - Extended the backward-compatible Markdown frontmatter contract with optional `turn_models`, aligned one-to-one with rendered dialogue sections and using `null` for unknown attribution.
@@ -17,7 +25,7 @@
 
 ### 2026-06-29
 
-- Project scaffolded from the earlier `contexts/ai_sessions` prototype and promoted into a standalone, installable package under `adhoc_jobs/ai_session_export/`.
+- Project scaffolded from an earlier prototype and promoted into a standalone, installable package.
 - Added the Google Antigravity source adapter (`src/ai_session_export/sources/antigravity.py`), registered in `sources/__init__.py`, `cli.py`, and `state.py` (`DEFAULT_STATE`).
 - Antigravity adapter parses `transcript_full.jsonl`, strips the `<USER_REQUEST>` XML wrapper, keeps only `USER_INPUT`/`USER_EXPLICIT` and `PLANNER_RESPONSE`/`MODEL` steps, and drops `CONVERSATION_HISTORY`, `CODE_ACTION`, tool calls, and thinking.
 - Added `--antigravity-dir` CLI flag and the `antigravity.last_timestamp` incremental cursor.
@@ -25,6 +33,10 @@
 - Added `docs/` with `prd.md`, `rfc.md`, `test.md`, and this file.
 
 ## Lessons Learned
+
+- **A product family is not one incremental domain.** Antigravity 2.0, IDE, and CLI use related transcript formats but write independently. A shared maximum timestamp can suppress unseen sessions from another surface; state must be scoped by surface and session.
+- **A parse failure is state, not just an exception.** Continuing past one bad transcript is necessary, but marking a partial session complete would make the data loss permanent. Failed fingerprints stay retryable and make cron report partial success explicitly.
+- **Legacy cursors encode historical scope.** The old Antigravity cursor represented only the IDE root, so applying it to newly discovered 2.0 or CLI roots would silently discard their history.
 
 - **Session-level model inventories cannot recover turn attribution.** Downstream analytics need an index-aligned `turn_models` contract; `models_used` remains descriptive metadata only.
 - **Codex records the same conversation through multiple event channels.** `response_item` mirrors narrative and tool traffic, while `event_msg` provides clean `user_message` and `agent_message` events. Reading both duplicates the transcript; the adapter treats `event_msg` as canonical.

@@ -6,17 +6,20 @@ import sqlite3
 import sys
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+import ai_session_export.cli as cli_module
 from ai_session_export.cli import DEFAULT_OPENCODE_DB, run_export
 from ai_session_export.markdown import render_markdown
 from ai_session_export.models import MessageTurn, SessionRecord
 from ai_session_export.sources.antigravity import (
     DEFAULT_ANTIGRAVITY_BRAIN_DIR,
+    DEFAULT_ANTIGRAVITY_BRAIN_DIRS,
     export_antigravity,
 )
 from ai_session_export.sources.claude_code import export_claude_code, parse_claude_session_file
@@ -38,7 +41,7 @@ from ai_session_export.utils import sanitize_filename, should_skip_session, uniq
 
 
 def test_sanitize_filename() -> None:
-    assert sanitize_filename("应对新老板推翻路线与文档埋坑") == "应对新老板推翻路线与文档埋坑"
+    assert sanitize_filename("合成测试会话") == "合成测试会话"
     assert sanitize_filename(" AI  @@@  Session !!! ") == "AI_Session"
     assert sanitize_filename("a__b---c") == "a_b_c"
     assert sanitize_filename("") == "untitled"
@@ -55,31 +58,31 @@ def test_should_skip_session() -> None:
 def test_render_markdown_second_mind_shape() -> None:
     record = SessionRecord(
         source="second_mind",
-        session_id="0f674620-18a8-40a0-8ade-2fae63dc1e5e",
-        title="应对新老板推翻路线与文档埋坑",
+        session_id="fixture-second-mind-session",
+        title="Synthetic Planning Session",
         date="2025-11-20",
         messages=[
-            MessageTurn(role="user", content="我是一个Scientist"),
-            MessageTurn(role="assistant", content="这是一份为你准备的"),
+            MessageTurn(role="user", content="Synthetic question"),
+            MessageTurn(role="assistant", content="Synthetic answer"),
         ],
     )
     output = render_markdown(record)
     assert output.startswith("---\nsource: second_mind\n")
-    assert 'session_id: "0f674620-18a8-40a0-8ade-2fae63dc1e5e"' in output
-    assert 'title: "应对新老板推翻路线与文档埋坑"' in output
+    assert 'session_id: "fixture-second-mind-session"' in output
+    assert 'title: "Synthetic Planning Session"' in output
     assert 'date: "2025-11-20"' in output
     assert "message_count: 2" in output
-    assert "\n# 应对新老板推翻路线与文档埋坑\n" in output
-    assert "\n## User\n\n我是一个Scientist\n" in output
-    assert "\n## Assistant\n\n这是一份为你准备的\n" in output
+    assert "\n# Synthetic Planning Session\n" in output
+    assert "\n## User\n\nSynthetic question\n" in output
+    assert "\n## Assistant\n\nSynthetic answer\n" in output
     assert "turn_models:" not in output
 
 
 def test_render_markdown_opencode_shape() -> None:
     record = SessionRecord(
         source="opencode",
-        session_id="ses_377f8237dffe",
-        title="AI Era Scaling and Organizational Knowledge Transfer",
+        session_id="fixture-opencode-session",
+        title="Synthetic Scaling Session",
         date="2026-02-22",
         project_directory="/home/user/project",
         models_used=["claude-opus-4-6", "claude-haiku-4-5"],
@@ -90,7 +93,7 @@ def test_render_markdown_opencode_shape() -> None:
     )
     output = render_markdown(record)
     assert output.startswith("---\nsource: opencode\n")
-    assert 'session_id: "ses_377f8237dffe"' in output
+    assert 'session_id: "fixture-opencode-session"' in output
     assert 'project_directory: "/home/user/project"' in output
     assert 'models_used: ["claude-opus-4-6", "claude-haiku-4-5"]' in output
     assert 'turn_models: ["claude-opus-4-6", "claude-opus-4-6"]' in output
@@ -153,7 +156,21 @@ def test_state_load_save_roundtrip(tmp_path: Path) -> None:
     assert reloaded["custom_key"] == "value"
     # Defaults for other sources are preserved on reload.
     assert reloaded["second_mind"]["last_export_count"] == 0
-    assert reloaded["antigravity"]["last_timestamp"] == 0
+    assert reloaded["antigravity"] == {
+        "last_timestamp": 0,
+        "legacy_cursor_migrated": False,
+        "surfaces": {},
+    }
+
+
+def test_state_loading_legacy_shape_does_not_mutate_defaults(tmp_path: Path) -> None:
+    state_file = tmp_path / ".export_state.json"
+    state_file.write_text(json.dumps({"antigravity": {"last_timestamp": 123}}), encoding="utf-8")
+
+    loaded = load_state(state_file)
+    loaded["antigravity"]["surfaces"]["ide"] = {"sessions": {}}
+
+    assert DEFAULT_STATE["antigravity"]["surfaces"] == {}
 
 
 def test_state_defaults() -> None:
@@ -161,7 +178,11 @@ def test_state_defaults() -> None:
     assert state["second_mind"] == {"last_export_count": 0}
     assert state["opencode"] == {"last_session_time": 0}
     assert state["claude_code"] == {"last_timestamp": 0}
-    assert state["antigravity"] == {"last_timestamp": 0}
+    assert state["antigravity"] == {
+        "last_timestamp": 0,
+        "legacy_cursor_migrated": False,
+        "surfaces": {},
+    }
     assert state["codex"] == {"sessions": {}}
 
 
@@ -346,7 +367,11 @@ def _write_claude_session(projects_root: Path, history_file: Path) -> None:
     )
 
 
-def _write_antigravity_transcript(brain_dir: Path, session_id: str = "antigravity-session-fixture") -> None:
+def _write_antigravity_transcript(
+    brain_dir: Path,
+    session_id: str = "antigravity-session-fixture",
+    user_text: str = "Fix the bug in auth.py",
+) -> Path:
     transcript_dir = brain_dir / session_id / ".system_generated" / "logs"
     transcript_dir.mkdir(parents=True, exist_ok=True)
     transcript = transcript_dir / "transcript_full.jsonl"
@@ -360,7 +385,7 @@ def _write_antigravity_transcript(brain_dir: Path, session_id: str = "antigravit
                         "type": "USER_INPUT",
                         "status": "DONE",
                         "created_at": "2026-06-29T16:38:12Z",
-                        "content": "<USER_REQUEST>\nFix the bug in auth.py\n</USER_REQUEST>\n<ADDITIONAL_METADATA>\nActive Document: /home/user/project/auth.py\n</ADDITIONAL_METADATA>",
+                        "content": f"<USER_REQUEST>\n{user_text}\n</USER_REQUEST>\n<ADDITIONAL_METADATA>\nActive Document: /home/example/project/auth.py\n</ADDITIONAL_METADATA>",
                     }
                 ),
                 json.dumps(
@@ -408,6 +433,7 @@ def _write_antigravity_transcript(brain_dir: Path, session_id: str = "antigravit
         + "\n",
         encoding="utf-8",
     )
+    return transcript
 
 
 def _write_codex_session(session_dir: Path, index_file: Path, *, include_followup: bool = False) -> Path:
@@ -650,6 +676,7 @@ def test_antigravity_export_with_fixture(tmp_path: Path) -> None:
 
     # Frontmatter
     assert text.startswith("---\nsource: antigravity\n")
+    assert 'surface: "ide"' in text
     assert 'session_id: "antigravity-session-fixture"' in text
     assert 'date: "2026-06-29"' in text
     assert "message_count: 3" in text
@@ -672,6 +699,265 @@ def test_antigravity_export_with_fixture(tmp_path: Path) -> None:
     assert "I'll look at the auth.py file first." in text
     assert "The bug is on line 42" in text
     assert "view_file" not in text
+
+
+def test_antigravity_exports_all_surfaces_incrementally(tmp_path: Path) -> None:
+    brain_dirs = {
+        "2": tmp_path / "antigravity_2_brain",
+        "ide": tmp_path / "antigravity_ide_brain",
+        "cli": tmp_path / "antigravity_cli_brain",
+    }
+    _write_antigravity_transcript(brain_dirs["2"], "shared-session", "Review the desktop fixture")
+    _write_antigravity_transcript(brain_dirs["ide"], "shared-session", "Review the IDE fixture")
+    cli_transcript = _write_antigravity_transcript(
+        brain_dirs["cli"], "shared-session", "Review the CLI fixture"
+    )
+    state: dict[str, object] = {"antigravity": {"last_timestamp": 0, "surfaces": {}}}
+    output_dir = tmp_path / "antigravity"
+
+    first = export_antigravity(
+        output_dir,
+        state,
+        brain_dirs=brain_dirs,
+        full=False,
+        dry_run=False,
+        since_date=None,
+    )
+
+    assert first["scanned"] == 3
+    assert first["exported"] == 3
+    assert first["failed"] == 0
+    assert first["surfaces"] == {
+        "2": {"scanned": 1, "exported": 1, "failed": 0},
+        "ide": {"scanned": 1, "exported": 1, "failed": 0},
+        "cli": {"scanned": 1, "exported": 1, "failed": 0},
+    }
+    files = list(output_dir.glob("*.md"))
+    assert len(files) == 3
+    rendered = [file.read_text(encoding="utf-8") for file in files]
+    assert {line for text in rendered for line in text.splitlines() if line.startswith("surface:")} == {
+        'surface: "2"',
+        'surface: "ide"',
+        'surface: "cli"',
+    }
+
+    unchanged = export_antigravity(
+        output_dir,
+        state,
+        brain_dirs=brain_dirs,
+        full=False,
+        dry_run=False,
+        since_date=None,
+    )
+    assert unchanged["exported"] == 0
+
+    with cli_transcript.open("a", encoding="utf-8") as handle:
+        handle.write(
+            json.dumps(
+                {
+                    "step_index": 5,
+                    "source": "MODEL",
+                    "type": "PLANNER_RESPONSE",
+                    "status": "DONE",
+                    "created_at": "2026-06-29T16:40:00Z",
+                    "content": "The CLI follow-up is complete.",
+                }
+            )
+            + "\n"
+        )
+
+    updated = export_antigravity(
+        output_dir,
+        state,
+        brain_dirs=brain_dirs,
+        full=False,
+        dry_run=False,
+        since_date=None,
+    )
+    assert updated["exported"] == 1
+    assert updated["surfaces"]["cli"]["exported"] == 1
+    assert len(list(output_dir.glob("*.md"))) == 3
+    assert any("The CLI follow-up is complete." in file.read_text(encoding="utf-8") for file in files)
+
+    surfaces = state["antigravity"]["surfaces"]
+    assert set(surfaces) == {"2", "ide", "cli"}
+    assert surfaces["2"]["sessions"]["shared-session"]["status"] == "complete"
+    assert surfaces["ide"]["sessions"]["shared-session"]["status"] == "complete"
+    assert surfaces["cli"]["sessions"]["shared-session"]["status"] == "complete"
+
+
+def test_antigravity_malformed_session_does_not_block_other_surfaces(tmp_path: Path) -> None:
+    brain_dirs = {"2": tmp_path / "antigravity_2_brain", "ide": tmp_path / "antigravity_ide_brain"}
+    malformed = _write_antigravity_transcript(brain_dirs["2"], "malformed-session")
+    malformed.write_text("not-json\n" + malformed.read_text(encoding="utf-8"), encoding="utf-8")
+    _write_antigravity_transcript(brain_dirs["ide"], "valid-session")
+    state: dict[str, object] = {"antigravity": {"last_timestamp": 0, "surfaces": {}}}
+
+    result = export_antigravity(
+        tmp_path / "output",
+        state,
+        brain_dirs=brain_dirs,
+        full=False,
+        dry_run=False,
+        since_date=None,
+    )
+
+    assert result["scanned"] == 2
+    assert result["exported"] == 1
+    assert result["failed"] == 1
+    assert result["warnings"] == [
+        {
+            "surface": "2",
+            "line": 1,
+            "error": "Expecting value",
+        }
+    ]
+    failed_state = state["antigravity"]["surfaces"]["2"]["sessions"]["malformed-session"]
+    assert failed_state["status"] == "failed"
+    assert failed_state["error_line"] == 1
+    assert state["antigravity"]["surfaces"]["ide"]["sessions"]["valid-session"]["status"] == "complete"
+
+    malformed.write_text("\n".join(malformed.read_text(encoding="utf-8").splitlines()[1:]) + "\n", encoding="utf-8")
+    repaired = export_antigravity(
+        tmp_path / "output",
+        state,
+        brain_dirs=brain_dirs,
+        full=False,
+        dry_run=False,
+        since_date=None,
+    )
+    assert repaired["exported"] == 1
+    assert repaired["failed"] == 0
+    assert state["antigravity"]["surfaces"]["2"]["sessions"]["malformed-session"]["status"] == "complete"
+    assert len(list((tmp_path / "output").glob("*.md"))) == 2
+
+
+def test_antigravity_valid_json_with_wrong_shape_is_isolated(tmp_path: Path) -> None:
+    brain_dirs = {"2": tmp_path / "antigravity_2_brain", "cli": tmp_path / "antigravity_cli_brain"}
+    wrong_shape = _write_antigravity_transcript(brain_dirs["2"], "wrong-shape-session")
+    wrong_shape.write_text("[]\n" + wrong_shape.read_text(encoding="utf-8"), encoding="utf-8")
+    _write_antigravity_transcript(brain_dirs["cli"], "valid-cli-session")
+
+    result = export_antigravity(
+        tmp_path / "output",
+        {},
+        brain_dirs=brain_dirs,
+        full=False,
+        dry_run=False,
+        since_date=None,
+    )
+
+    assert result["exported"] == 1
+    assert result["failed"] == 1
+    assert result["warnings"][0]["error"] == "Expected a JSON object"
+
+
+def test_antigravity_invalid_field_type_is_isolated_and_state_is_saved(tmp_path: Path) -> None:
+    brain_dirs = {"2": tmp_path / "antigravity_2_brain", "cli": tmp_path / "antigravity_cli_brain"}
+    invalid = _write_antigravity_transcript(brain_dirs["2"], "invalid-field-session")
+    steps = [json.loads(line) for line in invalid.read_text(encoding="utf-8").splitlines()]
+    steps[0]["content"] = ["not", "a", "string"]
+    invalid.write_text("\n".join(json.dumps(step) for step in steps) + "\n", encoding="utf-8")
+    _write_antigravity_transcript(brain_dirs["cli"], "valid-cli-session")
+    state_file = tmp_path / "state.json"
+
+    results = run_export(
+        "antigravity",
+        full=False,
+        dry_run=False,
+        base_dir=tmp_path / "output",
+        state_file=state_file,
+        antigravity_brain_dirs=brain_dirs,
+    )
+
+    assert results[0]["exported"] == 1
+    assert results[0]["failed"] == 1
+    assert results[0]["warnings"] == [
+        {"surface": "2", "line": 1, "error": "Field 'content' must be a string"}
+    ]
+    persisted = load_state(state_file)
+    assert persisted["antigravity"]["surfaces"]["2"]["sessions"]["invalid-field-session"]["status"] == "failed"
+    assert persisted["antigravity"]["surfaces"]["cli"]["sessions"]["valid-cli-session"]["status"] == "complete"
+
+
+def test_antigravity_legacy_cursor_applies_only_to_ide(tmp_path: Path) -> None:
+    brain_dirs = {"2": tmp_path / "antigravity_2_brain", "ide": tmp_path / "antigravity_ide_brain"}
+    _write_antigravity_transcript(brain_dirs["2"], "new-surface-session")
+    _write_antigravity_transcript(brain_dirs["ide"], "legacy-ide-session")
+    state: dict[str, object] = {"antigravity": {"last_timestamp": 9_999_999_999_999}}
+
+    result = export_antigravity(
+        tmp_path / "output",
+        state,
+        brain_dirs=brain_dirs,
+        full=False,
+        dry_run=False,
+        since_date=None,
+    )
+
+    assert result["exported"] == 1
+    assert result["surfaces"]["2"]["exported"] == 1
+    assert result["surfaces"]["ide"]["exported"] == 0
+    ide_state = state["antigravity"]["surfaces"]["ide"]["sessions"]["legacy-ide-session"]
+    assert ide_state["status"] == "legacy_imported"
+    assert state["antigravity"]["legacy_cursor_migrated"] is True
+
+
+def test_antigravity_legacy_cursor_migration_waits_for_unfiltered_run(tmp_path: Path) -> None:
+    brain_dir = tmp_path / "brain"
+    _write_antigravity_transcript(brain_dir, "legacy-ide-session")
+    state: dict[str, object] = {"antigravity": {"last_timestamp": 9_999_999_999_999}}
+
+    filtered = export_antigravity(
+        tmp_path / "output",
+        state,
+        brain_dir=brain_dir,
+        full=False,
+        dry_run=False,
+        since_date=date(2026, 7, 1),
+    )
+    assert filtered["exported"] == 0
+    assert state["antigravity"].get("legacy_cursor_migrated") is not True
+
+    unfiltered = export_antigravity(
+        tmp_path / "output",
+        state,
+        brain_dir=brain_dir,
+        full=False,
+        dry_run=False,
+        since_date=None,
+    )
+    assert unfiltered["exported"] == 0
+    assert state["antigravity"]["legacy_cursor_migrated"] is True
+    assert state["antigravity"]["surfaces"]["ide"]["sessions"]["legacy-ide-session"]["status"] == (
+        "legacy_imported"
+    )
+
+
+def test_antigravity_dry_run_does_not_mutate_state(tmp_path: Path) -> None:
+    brain_dir = tmp_path / "brain"
+    _write_antigravity_transcript(brain_dir)
+    state: dict[str, object] = {
+        "antigravity": {
+            "last_timestamp": 0,
+            "legacy_cursor_migrated": False,
+            "surfaces": {"cli": {"sessions": {"sentinel": {"status": "ignored"}}}},
+        }
+    }
+    original_state = json.loads(json.dumps(state))
+
+    result = export_antigravity(
+        tmp_path / "output",
+        state,
+        brain_dir=brain_dir,
+        full=False,
+        dry_run=True,
+        since_date=None,
+    )
+
+    assert result["exported"] == 1
+    assert state == original_state
+    assert not (tmp_path / "output").exists()
 
 
 def test_codex_export_with_fixture_and_incremental_update(tmp_path: Path) -> None:
@@ -834,8 +1120,55 @@ def test_cli_run_export_all_sources(tmp_path: Path) -> None:
     assert persisted["second_mind"]["last_export_count"] == 1
     assert persisted["opencode"]["last_session_time"] > 0
     assert persisted["claude_code"]["last_timestamp"] > 0
-    assert persisted["antigravity"]["last_timestamp"] > 0
+    antigravity_sessions = persisted["antigravity"]["surfaces"]["ide"]["sessions"]
+    assert antigravity_sessions["antigravity-session-fixture"]["status"] == "complete"
     assert persisted["codex"]["sessions"]["codex-fixture-1"]["latest_timestamp"] > 0
+
+
+def test_cli_main_reports_partial_antigravity_failure(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    args = SimpleNamespace(
+        source="antigravity",
+        full=False,
+        dry_run=False,
+        base_dir=Path("/tmp/example-output"),
+        state_file=Path("/tmp/example-state.json"),
+        second_mind_json=Path("/tmp/example-second-mind.json"),
+        opencode_db=Path("/tmp/example-opencode.db"),
+        antigravity_dir=None,
+        codex_dir=None,
+        codex_session_index=Path("/tmp/example-codex-index.jsonl"),
+        since_date=None,
+    )
+    monkeypatch.setattr(cli_module, "parse_args", lambda: args)
+    monkeypatch.setattr(
+        cli_module,
+        "run_export",
+        lambda *args, **kwargs: [
+            {
+                "source": "antigravity",
+                "scanned": 2,
+                "exported": 1,
+                "failed": 1,
+                "warnings": [
+                    {
+                        "surface": "cli",
+                        "line": 7,
+                        "error": "Expected a JSON object",
+                    }
+                ],
+            }
+        ],
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        cli_module.main()
+
+    assert exc_info.value.code == 1
+    captured = capsys.readouterr()
+    assert "exported=1 scanned=2 failed=1" in captured.out
+    assert "[antigravity:cli] line 7: Expected a JSON object" in captured.err
+    assert "fixture-session" not in captured.err
+    assert "/tmp/" not in captured.err
 
 
 # --------------------------------------------------------------------------- #
@@ -852,8 +1185,9 @@ class TestLiveExport:
 
     def test_live_antigravity_export(self, tmp_path: Path) -> None:
         """Export 7 days of real Antigravity sessions."""
-        if not DEFAULT_ANTIGRAVITY_BRAIN_DIR.is_dir():
-            pytest.skip(f"Antigravity brain dir not found: {DEFAULT_ANTIGRAVITY_BRAIN_DIR}")
+        brain_dirs = {surface: path for surface, path in DEFAULT_ANTIGRAVITY_BRAIN_DIRS.items() if path.is_dir()}
+        if not brain_dirs:
+            pytest.skip("No Antigravity brain directories found")
 
         since = date.today() - timedelta(days=7)
 
@@ -861,7 +1195,7 @@ class TestLiveExport:
         export_antigravity(
             tmp_path / "dry",
             {},
-            brain_dir=DEFAULT_ANTIGRAVITY_BRAIN_DIR,
+            brain_dirs=brain_dirs,
             full=True,
             dry_run=True,
             since_date=since,
@@ -871,7 +1205,7 @@ class TestLiveExport:
         result = export_antigravity(
             tmp_path / "antigravity",
             {},
-            brain_dir=DEFAULT_ANTIGRAVITY_BRAIN_DIR,
+            brain_dirs=brain_dirs,
             full=True,
             dry_run=False,
             since_date=since,

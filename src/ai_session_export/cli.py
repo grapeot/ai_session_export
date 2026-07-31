@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import argparse
+import sys
+from collections.abc import Mapping
 from datetime import date
 from pathlib import Path
 from typing import Any
 
 from .sources import export_antigravity, export_claude_code, export_codex, export_opencode, export_second_mind
-from .sources.antigravity import DEFAULT_ANTIGRAVITY_BRAIN_DIR
 from .sources.claude_code import DEFAULT_CLAUDE_HISTORY_FILES, DEFAULT_CLAUDE_PROJECT_DIRS
 from .sources.codex import DEFAULT_CODEX_SESSION_DIRS, DEFAULT_CODEX_SESSION_INDEX
 from .state import load_state, save_state
@@ -30,7 +31,8 @@ def run_export(
     state_file: Path = STATE_FILE,
     second_mind_json: Path = SECOND_MIND_JSON,
     opencode_db: Path = DEFAULT_OPENCODE_DB,
-    antigravity_brain_dir: Path = DEFAULT_ANTIGRAVITY_BRAIN_DIR,
+    antigravity_brain_dir: Path | None = None,
+    antigravity_brain_dirs: Mapping[str, Path] | None = None,
     since_date: date | None = None,
     claude_project_dirs: tuple[Path, ...] | None = None,
     claude_history_files: tuple[Path, ...] | None = None,
@@ -80,6 +82,7 @@ def run_export(
                 base_dir / "antigravity",
                 state,
                 brain_dir=antigravity_brain_dir,
+                brain_dirs=antigravity_brain_dirs,
                 full=full,
                 dry_run=dry_run,
                 since_date=since_date,
@@ -115,8 +118,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--antigravity-dir",
         type=Path,
-        default=DEFAULT_ANTIGRAVITY_BRAIN_DIR,
-        help="Override Antigravity IDE brain directory.",
+        help="Override all default Antigravity surfaces with one IDE-compatible brain directory.",
     )
     parser.add_argument(
         "--codex-dir",
@@ -155,4 +157,13 @@ def main() -> None:
         if source == "second_mind":
             print(f"[second_mind] exported={result['exported']} total={result['total']}{suffix}")
         else:
-            print(f"[{source}] exported={result['exported']} scanned={result['scanned']}{suffix}")
+            failed = int(result.get("failed", 0))
+            failure_summary = f" failed={failed}" if failed else ""
+            print(f"[{source}] exported={result['exported']} scanned={result['scanned']}{failure_summary}{suffix}")
+            for warning in result.get("warnings", []):
+                print(
+                    f"[{source}:{warning['surface']}] line {warning['line']}: {warning['error']}",
+                    file=sys.stderr,
+                )
+    if any(int(result.get("failed", 0)) for result in results):
+        raise SystemExit(1)
