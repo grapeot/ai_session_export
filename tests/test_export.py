@@ -225,7 +225,7 @@ def _seed_cursor_db(db_path: Path) -> None:
         CREATE TABLE cursorDiskKV (key TEXT UNIQUE, value BLOB);
         """
     )
-    composer_id = "7435e1e0-0b51-4f82-a88f-a48a04d6187d"
+    composer_id = "a6f723dc-9c5b-4169-b03f-31abb1e6069b"
     created_ms = int(datetime(2026, 6, 29, 9, 0).timestamp() * 1000)
     header = {
         "type": "head",
@@ -1131,7 +1131,7 @@ def test_cursor_export_with_fixture(tmp_path: Path) -> None:
     assert len(files) == 1
     text = files[0].read_text(encoding="utf-8")
     assert "source: cursor" in text
-    assert 'session_id: "7435e1e0-0b51-4f82-a88f-a48a04d6187d"' in text
+    assert 'session_id: "a6f723dc-9c5b-4169-b03f-31abb1e6069b"' in text
     assert 'title: "Fixture Cursor Session"' in text
     assert 'project_directory: "/home/user/project"' in text
     assert "Review the fixture code" in text
@@ -1185,7 +1185,10 @@ def test_cursor_export_skips_subagent(tmp_path: Path) -> None:
 
 # --------------------------------------------------------------------------- #
 # 3. Integration test (self-contained; also runnable via `pytest -m integration`)
-# --------------------------------------------------------------------------- #@pytest.mark.integration
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.integration
 def test_cli_run_export_all_sources(tmp_path: Path) -> None:
     second_mind_json = tmp_path / "second_mind_export.json"
     _write_second_mind_json(second_mind_json)
@@ -1245,7 +1248,7 @@ def test_cli_run_export_all_sources(tmp_path: Path) -> None:
     antigravity_sessions = persisted["antigravity"]["surfaces"]["ide"]["sessions"]
     assert antigravity_sessions["antigravity-session-fixture"]["status"] == "complete"
     assert persisted["codex"]["sessions"]["codex-fixture-1"]["latest_timestamp"] > 0
-    assert persisted["cursor"]["sessions"]["7435e1e0-0b51-4f82-a88f-a48a04d6187d"]["latest_timestamp"] > 0
+    assert persisted["cursor"]["sessions"]["a6f723dc-9c5b-4169-b03f-31abb1e6069b"]["latest_timestamp"] > 0
 
 
 def test_cli_main_reports_partial_antigravity_failure(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
