@@ -12,6 +12,7 @@ DEFAULT_STATE = {
     "claude_code": {"last_timestamp": 0},
     "codex": {"sessions": {}},
     "antigravity": {"last_timestamp": 0, "legacy_cursor_migrated": False, "surfaces": {}},
+    "cursor": {"sessions": {}},
 }
 
 

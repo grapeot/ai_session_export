@@ -10,6 +10,7 @@ build/
 antigravity/
 claude_code/
 codex/
+cursor/
 opencode/
 second_mind/
 .env

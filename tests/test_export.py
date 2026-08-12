@@ -29,6 +29,7 @@ from ai_session_export.sources.codex import (
     export_codex,
     parse_codex_session_file,
 )
+from ai_session_export.sources.cursor import DEFAULT_CURSOR_DB, export_cursor
 from ai_session_export.sources.opencode import export_opencode
 from ai_session_export.sources.second_mind import export_second_mind
 from ai_session_export.state import DEFAULT_STATE, load_state, save_state
@@ -210,6 +211,59 @@ def test_yaml_string() -> None:
 # --------------------------------------------------------------------------- #
 # Fixture builders (synthetic, public-safe data)
 # --------------------------------------------------------------------------- #
+
+
+def _seed_cursor_db(db_path: Path) -> None:
+    conn = sqlite3.connect(str(db_path))
+    conn.executescript(
+        """
+        CREATE TABLE composerHeaders (
+            composerId TEXT PRIMARY KEY, workspaceId TEXT,
+            createdAt INTEGER, lastUpdatedAt INTEGER, checkpointAt INTEGER,
+            isArchived INTEGER, isSubagent INTEGER, recency INTEGER, value TEXT
+        );
+        CREATE TABLE cursorDiskKV (key TEXT UNIQUE, value BLOB);
+        """
+    )
+    composer_id = "a6f723dc-9c5b-4169-b03f-31abb1e6069b"
+    created_ms = int(datetime(2026, 6, 29, 9, 0).timestamp() * 1000)
+    header = {
+        "type": "head",
+        "composerId": composer_id,
+        "name": "Fixture Cursor Session",
+        "createdAt": created_ms,
+        "lastUpdatedAt": created_ms + 60_000,
+        "unifiedMode": "agent",
+        "workspaceIdentifier": {
+            "id": "54b624f649aa664190b9cdd8e92d92d1",
+            "uri": {"fsPath": "/home/user/project", "scheme": "file"},
+        },
+    }
+    conn.execute(
+        "INSERT INTO composerHeaders (composerId, createdAt, lastUpdatedAt, isSubagent, value) "
+        "VALUES (?,?,?,?,?)",
+        (composer_id, created_ms, created_ms + 60_000, 0, json.dumps(header)),
+    )
+    bubbles = [
+        {
+            "type": 1,
+            "text": "Review the fixture code",
+            "modelInfo": {"modelName": "fixture-cursor-model"},
+            "createdAt": "2026-06-29T09:15:00.000Z",
+        },
+        {
+            "type": 2,
+            "text": "The fixture looks good.",
+            "createdAt": "2026-06-29T09:15:01.000Z",
+        },
+    ]
+    for i, bubble in enumerate(bubbles):
+        conn.execute(
+            "INSERT INTO cursorDiskKV (key, value) VALUES (?,?)",
+            (f"bubbleId:{composer_id}:{i:08d}-0000-0000-0000-000000000000", json.dumps(bubble)),
+        )
+    conn.commit()
+    conn.close()
 
 
 def _write_second_mind_json(path: Path) -> None:
@@ -1063,6 +1117,72 @@ def test_codex_model_context_after_user_backfills_turn(tmp_path: Path) -> None:
     ]
 
 
+def test_cursor_export_with_fixture(tmp_path: Path) -> None:
+    db_path = tmp_path / "state.vscdb"
+    _seed_cursor_db(db_path)
+
+    state = {"cursor": {"sessions": {}}}
+    result = export_cursor(
+        tmp_path / "cursor", state, db_path=db_path, full=False, dry_run=False, since_date=None
+    )
+    assert result == {"source": "cursor", "scanned": 1, "exported": 1}
+
+    files = list((tmp_path / "cursor").glob("*.md"))
+    assert len(files) == 1
+    text = files[0].read_text(encoding="utf-8")
+    assert "source: cursor" in text
+    assert 'session_id: "a6f723dc-9c5b-4169-b03f-31abb1e6069b"' in text
+    assert 'title: "Fixture Cursor Session"' in text
+    assert 'project_directory: "/home/user/project"' in text
+    assert "Review the fixture code" in text
+    assert "The fixture looks good." in text
+    assert "fixture-cursor-model" in text
+    # The model is captured from the user bubble and carried to its response.
+    assert 'turn_models: ["fixture-cursor-model", "fixture-cursor-model"]' in text
+
+    unchanged = export_cursor(
+        tmp_path / "cursor", state, db_path=db_path, full=False, dry_run=False, since_date=None
+    )
+    assert unchanged["exported"] == 0
+
+
+def test_cursor_export_skips_subagent(tmp_path: Path) -> None:
+    db_path = tmp_path / "state.vscdb"
+    _seed_cursor_db(db_path)
+
+    conn = sqlite3.connect(str(db_path))
+    subagent_id = "11111111-1111-4111-8111-111111111111"
+    conn.execute(
+        "INSERT INTO composerHeaders (composerId, createdAt, lastUpdatedAt, isSubagent, value) "
+        "VALUES (?,?,?,?,?)",
+        (
+            subagent_id,
+            0,
+            0,
+            1,
+            json.dumps({"name": "Explore subagent", "workspaceIdentifier": {"uri": {"fsPath": ""}}}),
+        ),
+    )
+    conn.execute(
+        "INSERT INTO cursorDiskKV (key, value) VALUES (?,?)",
+        (
+            f"bubbleId:{subagent_id}:00000000-0000-0000-0000-000000000000",
+            json.dumps({"type": 1, "text": "subagent chatter", "createdAt": "2026-06-29T09:00:00.000Z"}),
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    state = {"cursor": {"sessions": {}}}
+    result = export_cursor(
+        tmp_path / "cursor", state, db_path=db_path, full=False, dry_run=False, since_date=None
+    )
+    assert result["exported"] == 1
+    files = list((tmp_path / "cursor").glob("*.md"))
+    assert len(files) == 1
+    assert "subagent chatter" not in files[0].read_text(encoding="utf-8")
+
+
 # --------------------------------------------------------------------------- #
 # 3. Integration test (self-contained; also runnable via `pytest -m integration`)
 # --------------------------------------------------------------------------- #
@@ -1087,6 +1207,9 @@ def test_cli_run_export_all_sources(tmp_path: Path) -> None:
     codex_index = tmp_path / "codex_session_index.jsonl"
     _write_codex_session(codex_dir, codex_index)
 
+    cursor_db = tmp_path / "cursor.vscdb"
+    _seed_cursor_db(cursor_db)
+
     state_file = tmp_path / ".export_state.json"
     results = run_export(
         "all",
@@ -1101,6 +1224,7 @@ def test_cli_run_export_all_sources(tmp_path: Path) -> None:
         claude_history_files=(history_file,),
         codex_session_dirs=(codex_dir,),
         codex_session_index=codex_index,
+        cursor_db=cursor_db,
     )
 
     assert {r["source"] for r in results} == {
@@ -1109,10 +1233,11 @@ def test_cli_run_export_all_sources(tmp_path: Path) -> None:
         "claude_code",
         "antigravity",
         "codex",
+        "cursor",
     }
 
     # Each source produced at least one markdown file under base_dir.
-    for sub in ("second_mind", "opencode", "claude_code", "antigravity", "codex"):
+    for sub in ("second_mind", "opencode", "claude_code", "antigravity", "codex", "cursor"):
         assert list((tmp_path / sub).glob("*.md")), f"no markdown emitted for {sub}"
 
     # State file was persisted with refreshed counters.
@@ -1123,6 +1248,7 @@ def test_cli_run_export_all_sources(tmp_path: Path) -> None:
     antigravity_sessions = persisted["antigravity"]["surfaces"]["ide"]["sessions"]
     assert antigravity_sessions["antigravity-session-fixture"]["status"] == "complete"
     assert persisted["codex"]["sessions"]["codex-fixture-1"]["latest_timestamp"] > 0
+    assert persisted["cursor"]["sessions"]["a6f723dc-9c5b-4169-b03f-31abb1e6069b"]["latest_timestamp"] > 0
 
 
 def test_cli_main_reports_partial_antigravity_failure(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
@@ -1137,6 +1263,7 @@ def test_cli_main_reports_partial_antigravity_failure(monkeypatch: pytest.Monkey
         antigravity_dir=None,
         codex_dir=None,
         codex_session_index=Path("/tmp/example-codex-index.jsonl"),
+        cursor_db=Path("/tmp/example-cursor.db"),
         since_date=None,
     )
     monkeypatch.setattr(cli_module, "parse_args", lambda: args)
@@ -1270,3 +1397,23 @@ class TestLiveExport:
             pytest.skip("No recent Codex sessions to export")
         assert len(files) == result["exported"]
         assert "source: codex" in files[0].read_text(encoding="utf-8")
+
+    def test_live_cursor_export(self, tmp_path: Path) -> None:
+        """Export recent Cursor sessions without exposing transcript content."""
+        if not DEFAULT_CURSOR_DB.exists():
+            pytest.skip(f"Cursor DB not found: {DEFAULT_CURSOR_DB}")
+
+        since = date.today() - timedelta(days=7)
+        result = export_cursor(
+            tmp_path / "cursor",
+            {},
+            db_path=DEFAULT_CURSOR_DB,
+            full=True,
+            dry_run=False,
+            since_date=since,
+        )
+        files = list((tmp_path / "cursor").glob("*.md"))
+        if result["exported"] == 0:
+            pytest.skip("No recent Cursor sessions to export")
+        assert len(files) == result["exported"]
+        assert "source: cursor" in files[0].read_text(encoding="utf-8")

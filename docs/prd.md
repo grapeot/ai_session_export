@@ -2,9 +2,9 @@
 
 ## Background
 
-AI coding assistants (OpenCode, Claude Code, Codex, Google Antigravity, Second Mind) each store their session transcripts in a different format and location: SQLite databases, JSONL event streams, and protobuf-backed transcripts. None of them ship a portable export. Developers who switch between these tools end up with their conversation history scattered across proprietary stores that are hard to search, back up, or feed into downstream workflows.
+AI coding assistants (OpenCode, Claude Code, Codex, Google Antigravity, Cursor, Second Mind) each store their session transcripts in a different format and location: SQLite databases, JSONL event streams, and protobuf-backed transcripts. None of them ship a portable export. Developers who switch between these tools end up with their conversation history scattered across proprietary stores that are hard to search, back up, or feed into downstream workflows.
 
-This project exists to collapse those five silos into one stable, human-readable Markdown archive that any text tool can index.
+This project exists to collapse those six silos into one stable, human-readable Markdown archive that any text tool can index.
 
 ## Goal
 
@@ -18,8 +18,8 @@ The primary users are individual developers who run multiple AI coding agents lo
 
 ### Functional
 
-1. Export sessions from OpenCode, Claude Code, Codex, Google Antigravity, and Second Mind into Markdown files.
-2. Each source writes into its own subdirectory under the configured base directory (`second_mind/`, `opencode/`, `claude_code/`, `codex/`, `antigravity/`).
+1. Export sessions from OpenCode, Claude Code, Codex, Google Antigravity, Cursor, and Second Mind into Markdown files.
+2. Each source writes into its own subdirectory under the configured base directory (`second_mind/`, `opencode/`, `claude_code/`, `codex/`, `antigravity/`, `cursor/`).
 3. Support incremental export: persisted source-specific state ensures only new or changed sessions are written on repeat runs. Sources with independently mutable surfaces must isolate state per surface and session.
 4. Support `--full` to ignore the cursor and re-export everything.
 5. Support `--since-date YYYY-MM-DD` to bound exports by session date.
@@ -53,9 +53,10 @@ The primary users are individual developers who run multiple AI coding agents lo
 | Claude Code | `~/.claude/projects/**/*.jsonl` plus history at `~/.claude/history.jsonl` | `claude_code.last_timestamp` (ms epoch) |
 | Codex | `~/.codex/sessions/**/*.jsonl`, `~/.codex/archived_sessions/*.jsonl`, and `~/.codex/session_index.jsonl` | Per-session latest timestamp, output filename, and source mtime |
 | Google Antigravity | `~/.gemini/antigravity/brain/*/.system_generated/logs/transcript_full.jsonl` (2.0), `~/.gemini/antigravity-ide/brain/*/...` (IDE), and `~/.gemini/antigravity-cli/brain/*/...` (CLI) | Per-surface, per-session source fingerprint, parse status, latest timestamp, and output filename |
+| Cursor | `~/Library/Application Support/Cursor/User/globalStorage/state.vscdb` (SQLite) | Per-session latest timestamp and output filename |
 | Second Mind | `second_mind_export.json` (a single JSON array export) | `second_mind.last_export_count` |
 
-All paths shown are defaults and can be overridden via CLI flags (`--opencode-db`, `--antigravity-dir`, `--codex-dir`, `--codex-session-index`, `--second-mind-json`, and the base directory).
+All paths shown are defaults and can be overridden via CLI flags (`--opencode-db`, `--antigravity-dir`, `--codex-dir`, `--codex-session-index`, `--cursor-db`, `--second-mind-json`, and the base directory).
 
 ## Markdown Output Contract
 
@@ -86,7 +87,7 @@ turn_models: ["model-a", "model-a"]
 
 Field rules:
 
-- `source` is one of `opencode`, `claude_code`, `codex`, `antigravity`, `second_mind`.
+- `source` is one of `opencode`, `claude_code`, `codex`, `antigravity`, `cursor`, `second_mind`.
 - `surface` is optional and is currently emitted only for Antigravity. Its stable values are `"2"`, `"ide"`, and `"cli"`; custom single-root overrides are treated as `"ide"` for backward compatibility.
 - All string frontmatter values are JSON-quoted so YAML-special characters are safe.
 - `message_count` is the count of exported turns (after noise filtering).
