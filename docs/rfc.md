@@ -193,7 +193,7 @@ The suite is split into four tiers, ordered from fastest/most-isolated to slowes
 
 1. **Unit tests** — pure functions with no I/O (`sanitize_filename`, `should_skip_session`, `render_markdown`, `yaml_string`, `unique_output_path`, `load_state`/`save_state`).
 2. **Source-adapter tests** — each adapter exercised against a synthetic fixture built in `tmp_path` (a hand-written JSONL/JSON file or a seeded SQLite database).
-3. **Integration test** — a single `run_export("all")` call that wires all five adapters into temp paths and asserts state is persisted with refreshed cursors and Antigravity per-session status.
+3. **Integration test** — a single `run_export("all")` call that wires all six adapters into temp paths and asserts state is persisted with refreshed cursors and Antigravity, Codex, and Cursor per-session status.
 4. **Live end-to-end tests** — opt-in via `AI_SESSION_EXPORT_LIVE=1`, run against the real local data on the developer's machine with a 7-day `--since-date` window. Skipped automatically in CI.
 
 See `docs/test.md` for the full per-test breakdown.
