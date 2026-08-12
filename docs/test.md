@@ -40,12 +40,14 @@ Each adapter is exercised against a synthetic fixture built inside `tmp_path`. T
 | `test_antigravity_dry_run_does_not_mutate_state` | A populated nested surface state and one new IDE fixture. | Dry-run reports the export without creating an output directory or mutating any in-memory state. |
 | `test_codex_export_with_fixture_and_incremental_update` | A synthetic rollout plus `session_index.jsonl`, including user/agent messages, reasoning, tool output, system metadata, and a model switch before a follow-up turn. | Only user/agent narrative survives; title/cwd/per-turn model metadata are preserved across the switch; unchanged reruns export zero files; appending turns updates the original Markdown file instead of creating a suffix duplicate. |
 | `test_codex_model_context_after_user_backfills_turn` | A synthetic rollout where `turn_context` follows the user event. | Delayed context backfills the pending user turn and applies to its assistant response. |
+| `test_cursor_export_with_fixture` | A seeded SQLite database with a `composerHeaders` row and two `bubbleId:` bubbles (one user with `modelInfo.modelName`, one assistant). | `exported == 1`; title, project directory, and session id come from the header JSON; the model captured from the user bubble carries to both turns in `turn_models`; an unchanged rerun exports zero files. |
+| `test_cursor_export_skips_subagent` | The cursor fixture plus a second composer whose header has `isSubagent = 1`. | The sub-agent composer is skipped; only the primary composer's Markdown is written; sub-agent chatter never appears in the output. |
 
 ## 3. Integration Test
 
 | Test | What it covers |
 |---|---|
-| `test_cli_run_export_all_sources` (marked `integration`) | Calls `run_export("all")` with all five synthetic fixtures wired into `tmp_path`, then asserts every source appears, every source writes Markdown, and persisted state includes Antigravity and Codex per-session status. |
+| `test_cli_run_export_all_sources` (marked `integration`) | Calls `run_export("all")` with all six synthetic fixtures wired into `tmp_path`, then asserts every source appears, every source writes Markdown, and persisted state includes Antigravity, Codex, and Cursor per-session status. |
 | `test_cli_main_reports_partial_antigravity_failure` | Injects a synthetic adapter warning and verifies the CLI prints `failed=1`, writes a privacy-safe surface/line diagnostic to stderr, and exits with status 1. |
 
 This is the only test that exercises `cli.py`'s dispatch and state-persistence logic end to end; it is the regression guard for the "adding a new source" checklist in `AGENTS.md`.
@@ -59,6 +61,7 @@ These tests run against the developer's real local data and are **opt-in**. They
 | `test_live_antigravity_export` | Discovers whichever of the three default Antigravity surface roots exist. Runs a `--dry-run` scan first, then a real export over the last 7 days. Asserts the number of written files equals `result["exported"]` and that a sample carries `source: antigravity`. Skips gracefully if there are no recent sessions. |
 | `test_live_opencode_export` | Skips if the default OpenCode database does not exist. Same dry-run-then-real pattern over the last 7 days. Asserts file count matches `exported` and that a sample carries `source: opencode`. |
 | `test_live_codex_export` | Skips if no default Codex session directory exists. Exports only the last 7 days to `tmp_path`, checks file counts, and verifies `source: codex` without printing transcript content. |
+| `test_live_cursor_export` | Skips if the default Cursor `state.vscdb` does not exist. Exports only the last 7 days to `tmp_path`, checks file counts, and verifies `source: cursor` without printing transcript content. |
 
 To run the full suite including live tests on a populated machine:
 

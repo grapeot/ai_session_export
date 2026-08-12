@@ -53,7 +53,28 @@ Each adapter follows the same contract: a function `export_<name>(output_dir, st
 | `opencode.py` | SQLite database at `~/.local/share/opencode/opencode.db`, opened read-only via the `file:...?mode=ro` URI. | Joins `session` -> `message` -> `part`. Text parts (`json_extract(data, '$.type') == 'text'`) are concatenated per message; each message's native model metadata is retained on its turn. Sessions with zero user turns are skipped. Noise titles (sub-agent chatter) are filtered via `utils.should_skip_session`. Cursor is `session.time_created` (`last_session_time`). |
 | `claude_code.py` | JSONL session files under `~/.claude/projects/**/*.jsonl`, plus `history.jsonl` for human-readable titles. | Iterates session files (excluding anything under a `subagents/` path). Each line is one event; `user` and `assistant` events produce turns, `isSidechain` events are skipped. Assistant content is an array that may mix `text` and `tool_use` items — only `text` items survive. `tool_result` user messages produce empty text and are dropped. A following assistant model is assigned to pending user turns. Titles are chosen from the history file when a meaningful `display` exists, otherwise from the first user message. Cursor is the max event timestamp (`last_timestamp`). |
 | `codex.py` | Rollout JSONL under `~/.codex/sessions/` and `~/.codex/archived_sessions/`, plus `session_index.jsonl` for titles. | Keeps only `event_msg.user_message` and `event_msg.agent_message`. It drops developer instructions, reasoning, tool calls/results, token accounting, and world state. `session_meta` supplies id/cwd and `turn_context` supplies the current model, including delayed backfill when context follows a user event. Per-session state updates one stable Markdown file as an active rollout grows; unchanged source mtimes skip reparsing. |
+| `cursor.py` | A single SQLite database at `~/Library/Application Support/Cursor/User/globalStorage/state.vscdb`. | See the dedicated section below. Composer enumeration is derived from `bubbleId:` keys; `composerHeaders` supplies metadata. |
 | `antigravity.py` | JSONL transcripts under the Antigravity 2.0, IDE, and CLI brain roots. | One JSON object per line per "step". See the dedicated section below. Incremental state is isolated by surface and session, using source mtime/size fingerprints and stable output filenames. |
+
+## Cursor Adapter Design
+
+Cursor keeps its chat history in a single SQLite database, `state.vscdb`, rather than per-session files. Three tables are relevant:
+
+| Table | Role |
+|---|---|
+| `composerHeaders` | One row per composer (session). `composerId` is the primary key; `value` is a JSON blob carrying `name` (title), `workspaceIdentifier.uri.fsPath` (project directory), and `createdAt`/`lastUpdatedAt`. `isSubagent` marks sub-agent composers. |
+| `cursorDiskKV` | A key/value store. Message content lives under keys shaped `bubbleId:<composerId>:<bubbleId>`; each value is one bubble (message). |
+| `ItemTable` | VSCode-style UI state; irrelevant to transcripts. |
+
+A bubble's JSON carries `type` (1 = user, 2 = assistant), `text` (plain body), `richText` (a Lexical editor tree used as a fallback when `text` is empty), `modelInfo.modelName` (the responding model, recorded on the user bubble), and `createdAt` (ISO timestamp used for ordering). Assistant bubbles may also carry `thinking` and `codeBlocks`, which the adapter drops like other sources drop reasoning and tool payloads.
+
+Two structural quirks drive the adapter design:
+
+1. **Composer id namespaces do not fully overlap.** The `composerId` values that appear inside `bubbleId:` keys and the ones listed in `composerHeaders` are largely the same but not identical. Some composers have bubbles but no header row (old or deleted sessions), and some header rows have no bubbles (empty sessions). The adapter therefore enumerates sessions from `bubbleId:` key prefixes — the messages are the authoritative record — and uses `composerHeaders` only to supply title and project directory, falling back to the first user message when no header exists.
+
+2. **Model attribution sits on the user bubble.** Cursor records the responding model as `modelInfo.modelName` on the user bubble (the model selected to answer that turn) and leaves most assistant bubbles unannotated. The adapter therefore mirrors Claude Code: it captures the model from a user turn and carries it forward to that turn's assistant responses, so `turn_models` stays aligned without fabricating attribution on assistant-only sequences.
+
+The adapter opens the database read-only via `file:...?mode=ro`. It enumerates composer ids with a grouped `substr` over `bubbleId:` keys while computing each composer's max `createdAt` in the same query. Incremental state is per-session (like Codex): each composer id stores `latest_timestamp` and `output_file`, where `latest_timestamp` is the maximum of the header's `lastUpdatedAt` and the composer's max bubble `createdAt`. Unchanged composers whose output file already exists are skipped. Sub-agent composers (`isSubagent = 1`) are skipped entirely because they contain agent-to-agent chatter rather than user dialogue.
 
 ## Antigravity Adapter Design
 
@@ -125,7 +146,8 @@ A single JSON state file (default `.export_state.json` next to the export root) 
       }
     }
   },
-  "codex": {"sessions": {"example-id": {"latest_timestamp": 1719648000000, "output_file": "20260629_example.md", "source_mtime_ns": 123}}}
+  "codex": {"sessions": {"example-id": {"latest_timestamp": 1719648000000, "output_file": "20260629_example.md", "source_mtime_ns": 123}}},
+  "cursor": {"sessions": {"example-id": {"latest_timestamp": 1719648000000, "output_file": "20260629_example.md"}}}
 }
 ```
 
@@ -136,6 +158,7 @@ Each adapter carries its own cursor semantics because the sources expose time di
 - **Claude Code** reduces each transcript to a single `latest_timestamp_ms` and compares it with a source-level cursor.
 - **Antigravity** keeps independent per-session state inside each product surface. Unchanged mtime/size fingerprints skip reparsing, changed sessions rewrite their prior output file, failed sessions remain retryable, and identical session ids on different surfaces do not collide in state.
 - **Codex** uses per-session state because active rollout files keep growing and archived sessions can move between directories. The adapter rewrites the same output file when a session changes and skips unchanged files by source mtime.
+- **Cursor** uses per-session state because composer bubbles grow in place and the composer id namespace does not fully overlap the header table. The adapter rewrites the same output file when a session's max timestamp advances and skips unchanged composers whose output already exists.
 
 The deprecated `antigravity.last_timestamp` is retained only as a one-time migration input for existing installations. Because the old adapter scanned only the IDE, that cursor is applied only to the `ide` surface. Migration completes only on an unfiltered run that scanned at least one IDE transcript without parse failures; 2.0 and CLI sessions are never suppressed by the legacy cursor.
 
@@ -154,13 +177,13 @@ Flags:
 
 | Flag | Purpose |
 |---|---|
-| `--source {all,second-mind,opencode,claude-code,antigravity,codex}` | Select one source or all. |
+| `--source {all,second-mind,opencode,claude-code,antigravity,codex,cursor}` | Select one source or all. |
 | `--full` | Ignore cursors; export everything. |
 | `--dry-run` | Scan and report without writing or persisting state. |
 | `--since-date YYYY-MM-DD` | Drop sessions whose date is before the given day. |
 | `--base-dir` | Override the export root (default: `~/.local/share/ai-session-export`). |
 | `--state-file` | Override the state cursor file. |
-| `--second-mind-json`, `--opencode-db`, `--antigravity-dir`, `--codex-dir`, `--codex-session-index` | Override each source's input location. `--antigravity-dir` preserves the original single-root interface and treats that root as an IDE-compatible surface; omitting it scans all three defaults. |
+| `--second-mind-json`, `--opencode-db`, `--antigravity-dir`, `--codex-dir`, `--codex-session-index`, `--cursor-db` | Override each source's input location. `--antigravity-dir` preserves the original single-root interface and treats that root as an IDE-compatible surface; omitting it scans all three defaults. |
 
 After each adapter runs, `main()` prints one summary line per source (`exported=N scanned=N`, or `exported=N total=N` for Second Mind). Antigravity adds `failed=N` when any session could not be parsed, then exits non-zero after persisting successful work so cron can distinguish partial success from a clean run.
 

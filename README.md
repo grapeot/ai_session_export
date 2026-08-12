@@ -12,6 +12,7 @@ Export AI coding session transcripts from multiple tools into a unified Markdown
 | Google Antigravity 2.0 | `~/.gemini/antigravity/brain/*/.system_generated/logs/transcript_full.jsonl` |
 | Google Antigravity IDE | `~/.gemini/antigravity-ide/brain/*/.system_generated/logs/transcript_full.jsonl` |
 | Google Antigravity CLI | `~/.gemini/antigravity-cli/brain/*/.system_generated/logs/transcript_full.jsonl` |
+| Cursor | `~/Library/Application Support/Cursor/User/globalStorage/state.vscdb` |
 | Second Mind | `second_mind_export.json` |
 
 ## Quick Start
@@ -26,6 +27,7 @@ python export_sessions.py
 # Export specific source
 python export_sessions.py --source antigravity
 python export_sessions.py --source codex
+python export_sessions.py --source cursor
 
 # Full re-export (ignore incremental state)
 python export_sessions.py --full

@@ -1,5 +1,13 @@
 ## Changelog
 
+### 2026-08-12
+
+- Added the Cursor source adapter (`src/ai_session_export/sources/cursor.py`), registered in `sources/__init__.py`, `cli.py`, and `state.py` (`DEFAULT_STATE`).
+- Cursor reads the single `state.vscdb` SQLite database: it enumerates composers from `bubbleId:` key prefixes, pulls title/project directory from `composerHeaders`, orders messages by bubble `createdAt`, and keeps only user/assistant bubbles. `modelInfo.modelName` on user bubbles feeds `turn_models` and carries forward to assistant responses.
+- Skipped sub-agent composers (`isSubagent = 1`) as agent-to-agent chatter, consistent with the existing noise-drop contract.
+- Added `--cursor-db` CLI flag and per-session incremental state (`latest_timestamp` + `output_file`).
+- Added synthetic adapter, sub-agent-skip, live, and all-source integration coverage.
+
 ### 2026-07-31
 
 - Expanded the single Antigravity adapter to scan Antigravity 2.0, Antigravity IDE, and Antigravity CLI while preserving the stable `source: antigravity` contract and adding optional `surface` provenance.
@@ -47,3 +55,5 @@
 - **User intent is wrapped in XML, not bare text.** The `content` of a `USER_INPUT` step is a concatenation of `<USER_REQUEST>...</USER_REQUEST>` and `<ADDITIONAL_METADATA>...</ADDITIONAL_METADATA>` blocks. Exporting the raw content would leak IDE state (active document paths, cursor position, etc.) into the archive, so the adapter must extract only the inner `USER_REQUEST` text.
 - **Planner responses are narrative, not tool calls.** A single model turn may carry both a `PLANNER_RESPONSE` step (narrated text, worth keeping) and a `CODE_ACTION` step (the applied edit, not worth keeping) at adjacent `step_index` values. Treating them as separate step types — rather than collapsing them — keeps the archive readable.
 - **Second Mind cannot be cursor'd by timestamp.** Its export JSON does not expose a reliable per-conversation timestamp, so the incremental cursor is a plain count of conversations already seen. This is fragile if the export file is regenerated in a different order; `--full` is the escape hatch.
+
+- **Cursor composer ids are not a single namespace.** The ids in `bubbleId:` keys and the ids in `composerHeaders` overlap but do not match exactly: some composers have bubbles but no header row, and some header rows have no bubbles. The bubbles are the authoritative record, so enumeration must start from the key prefixes and treat the header table as optional metadata.
