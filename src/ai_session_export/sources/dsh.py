@@ -14,6 +14,9 @@ from ..utils import ms_to_date, should_skip_session, unique_output_path
 
 DEFAULT_DSH_SESSIONS_DIR = Path.home() / ".dsh" / "sessions"
 SYSTEM_REMINDER_PATTERN = re.compile(r"<system-reminder>.*?</system-reminder>", re.DOTALL)
+# Stable prefix of DSH's rendered context snapshot (renderContextSnapshot in
+# dsh-system-prompt); injected as a plain user message, without a reminder wrapper.
+RUNTIME_CONTEXT_PREFIX = "Current runtime context."
 
 
 class ParsedDshSession(NamedTuple):
@@ -157,7 +160,7 @@ def parse_dsh_session_file(file_path: Path) -> ParsedDshSession | None:
 
         if event_type == "user/message":
             text = _strip_system_reminders(_extract_text_content(data.get("content")))
-            if not text:
+            if not text or text.startswith(RUNTIME_CONTEXT_PREFIX):
                 continue
             if first_user_text is None:
                 first_user_text = text

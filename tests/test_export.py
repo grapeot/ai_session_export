@@ -1380,6 +1380,20 @@ def test_dsh_system_reminder_injection_is_dropped(tmp_path: Path) -> None:
             "time": DSH_FIXTURE_CREATED_AT + 102,
             "data": {"content": [{"type": "text", "text": "<system-reminder>note</system-reminder>\nActual text beside a reminder"}], "role": "user"},
         }),
+        json.dumps({
+            "type": "user/message",
+            "seq": 4,
+            "time": DSH_FIXTURE_CREATED_AT + 103,
+            "data": {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "Current runtime context. This snapshot supersedes earlier runtime-context snapshots.\n\nMode: danger-full-access.",
+                    }
+                ],
+                "role": "user",
+            },
+        }),
     ]
     (session_dir / "session.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
