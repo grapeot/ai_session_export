@@ -4,6 +4,7 @@ from .antigravity import export_antigravity
 from .claude_code import export_claude_code
 from .codex import export_codex
 from .cursor import export_cursor
+from .dsh import export_dsh
 from .opencode import export_opencode
 from .second_mind import export_second_mind
 
@@ -12,6 +13,7 @@ __all__ = [
     "export_claude_code",
     "export_codex",
     "export_cursor",
+    "export_dsh",
     "export_opencode",
     "export_second_mind",
 ]

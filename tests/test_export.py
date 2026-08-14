@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sqlite3
+import subprocess
 import sys
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -30,10 +32,11 @@ from ai_session_export.sources.codex import (
     parse_codex_session_file,
 )
 from ai_session_export.sources.cursor import DEFAULT_CURSOR_DB, export_cursor
+from ai_session_export.sources.dsh import DEFAULT_DSH_SESSIONS_DIR, export_dsh, parse_dsh_session_file
 from ai_session_export.sources.opencode import export_opencode
 from ai_session_export.sources.second_mind import export_second_mind
 from ai_session_export.state import DEFAULT_STATE, load_state, save_state
-from ai_session_export.utils import sanitize_filename, should_skip_session, unique_output_path, yaml_string
+from ai_session_export.utils import ms_to_date, sanitize_filename, should_skip_session, unique_output_path, yaml_string
 
 
 # --------------------------------------------------------------------------- #
@@ -1183,6 +1186,393 @@ def test_cursor_export_skips_subagent(tmp_path: Path) -> None:
     assert "subagent chatter" not in files[0].read_text(encoding="utf-8")
 
 
+DSH_FIXTURE_SESSION_ID = "session-d5a4b3c2-1111-4222-8333-444455556666"
+DSH_FIXTURE_CREATED_AT = 1786740000000
+
+
+def _dsh_fixture_events() -> list[dict[str, object]]:
+    return [
+        {
+            "type": "session",
+            "version": 0,
+            "id": DSH_FIXTURE_SESSION_ID,
+            "createdAt": DSH_FIXTURE_CREATED_AT,
+            "cwd": "/home/user/project",
+            "agentPreset": "standard",
+        },
+        {"type": "permission/preset", "seq": 0, "time": DSH_FIXTURE_CREATED_AT + 1, "data": {"preset": "default"}},
+        {
+            "type": "user/message",
+            "seq": 1,
+            "time": DSH_FIXTURE_CREATED_AT + 100,
+            "data": {
+                "content": [{"type": "text", "text": "Instrument the DSH fixture"}],
+                "role": "user",
+            },
+        },
+        {"type": "turn/start", "seq": 2, "time": DSH_FIXTURE_CREATED_AT + 101, "data": {"turn": 1}},
+        {
+            "type": "request/header",
+            "seq": 3,
+            "time": DSH_FIXTURE_CREATED_AT + 102,
+            "data": {"header": {"config": {"provider": "fixture-provider", "model": "fixture-model"}}},
+        },
+        {
+            "type": "assistant/message",
+            "seq": 4,
+            "time": DSH_FIXTURE_CREATED_AT + 200,
+            "data": {
+                "message": {
+                    "content": [
+                        {"type": "reasoning", "text": "internal reasoning must not leak"},
+                        {"type": "text", "text": "The fixture is wired correctly."},
+                    ],
+                    "role": "assistant",
+                    "source": {"kind": "model", "provider": "fixture-provider", "model": "fixture-model"},
+                }
+            },
+        },
+        {
+            "type": "assistant/message",
+            "seq": 5,
+            "time": DSH_FIXTURE_CREATED_AT + 300,
+            "data": {
+                "message": {
+                    "content": [{"type": "text", "text": "Second step narration."}],
+                    "role": "assistant",
+                    "source": {"kind": "model", "provider": "fixture-provider", "model": "fixture-model"},
+                }
+            },
+        },
+        {
+            "type": "session/title",
+            "seq": 6,
+            "time": DSH_FIXTURE_CREATED_AT + 400,
+            "data": {"title": "fallback title", "source": {"kind": "fallback"}},
+        },
+        {
+            "type": "session/title",
+            "seq": 7,
+            "time": DSH_FIXTURE_CREATED_AT + 500,
+            "data": {"title": "DSH fixture title", "source": {"kind": "provider"}},
+        },
+    ]
+
+
+def _write_dsh_session(
+    sessions_dir: Path,
+    *,
+    session_id: str = DSH_FIXTURE_SESSION_ID,
+    origin: str = "",
+    compressed: bool = False,
+    torn_tail: bool = False,
+) -> Path:
+    events = _dsh_fixture_events()
+    if origin:
+        events[0] = {**events[0], "origin": origin, "delegationDepth": 1}
+    text = "\n".join(json.dumps(event) for event in events) + "\n"
+    if torn_tail:
+        text += '{"type": "assistant/message", "seq": 7, "time": '
+    session_dir = sessions_dir / "--home-user-project--" / session_id
+    session_dir.mkdir(parents=True, exist_ok=True)
+    file_path = session_dir / ("session.jsonl.zstd" if compressed else "session.jsonl")
+    if compressed:
+        file_path.write_bytes(
+            subprocess.run(["zstd", "-c", "-"], input=text.encode(), capture_output=True, check=True).stdout
+        )
+    else:
+        file_path.write_text(text, encoding="utf-8")
+    return file_path
+
+
+def test_dsh_export_with_fixture(tmp_path: Path) -> None:
+    sessions_dir = tmp_path / "sessions"
+    _write_dsh_session(sessions_dir, torn_tail=True)
+
+    state = {"dsh": {"sessions": {}}}
+    result = export_dsh(
+        tmp_path / "dsh",
+        state,
+        full=False,
+        dry_run=False,
+        since_date=None,
+        sessions_dir=sessions_dir,
+    )
+    assert result["exported"] == 1
+
+    files = list((tmp_path / "dsh").glob("*.md"))
+    assert len(files) == 1
+    content = files[0].read_text(encoding="utf-8")
+    assert "source: dsh" in content
+    assert "DSH fixture title" in content
+    assert 'project_directory: "/home/user/project"' in content
+    assert 'models_used: ["fixture-provider/fixture-model"]' in content
+    assert 'turn_models: ["fixture-provider/fixture-model", "fixture-provider/fixture-model", "fixture-provider/fixture-model"]' in content
+    assert "## User [" in content
+    assert "The fixture is wired correctly." in content
+    assert "Second step narration." in content
+    # Reasoning blocks and torn tails never reach the archive.
+    assert "internal reasoning" not in content
+
+    # Incremental cursor recorded per session.
+    assert state["dsh"]["sessions"][DSH_FIXTURE_SESSION_ID]["latest_timestamp"] > 0
+
+
+def test_dsh_growing_session_rewrites_one_file(tmp_path: Path) -> None:
+    sessions_dir = tmp_path / "sessions"
+    file_path = _write_dsh_session(sessions_dir)
+    state = {"dsh": {"sessions": {}}}
+
+    export_dsh(tmp_path / "dsh", state, full=False, dry_run=False, since_date=None, sessions_dir=sessions_dir)
+    first_files = sorted(path.name for path in (tmp_path / "dsh").glob("*.md"))
+    assert len(first_files) == 1
+
+    # The live session grows: append a later turn and re-export.
+    grown = file_path.read_text(encoding="utf-8") + json.dumps(
+        {
+            "type": "user/message",
+            "seq": 8,
+            "time": DSH_FIXTURE_CREATED_AT + 5000,
+            "data": {"content": [{"type": "text", "text": "Follow-up after growth"}], "role": "user"},
+        }
+    ) + "\n"
+    file_path.write_text(grown, encoding="utf-8")
+
+    result = export_dsh(tmp_path / "dsh", state, full=False, dry_run=False, since_date=None, sessions_dir=sessions_dir)
+    assert result["exported"] == 1
+    files = sorted(path.name for path in (tmp_path / "dsh").glob("*.md"))
+    assert files == first_files  # same output file rewritten, no _2 duplicate
+    assert "Follow-up after growth" in (tmp_path / "dsh" / files[0]).read_text(encoding="utf-8")
+
+
+def test_dsh_subagent_session_is_skipped(tmp_path: Path) -> None:
+    sessions_dir = tmp_path / "sessions"
+    _write_dsh_session(sessions_dir, session_id="session-sub-00000000-1111-4222-8333-444455556666", origin="subagent")
+
+    state = {"dsh": {"sessions": {}}}
+    result = export_dsh(
+        tmp_path / "dsh", state, full=False, dry_run=False, since_date=None, sessions_dir=sessions_dir
+    )
+    assert result["exported"] == 0
+    assert not list((tmp_path / "dsh").glob("*.md"))
+
+
+def test_dsh_system_reminder_injection_is_dropped(tmp_path: Path) -> None:
+    session_dir = tmp_path / "sessions" / "--home-user-project--" / DSH_FIXTURE_SESSION_ID
+    session_dir.mkdir(parents=True)
+    lines = [
+        json.dumps({"type": "session", "version": 0, "id": DSH_FIXTURE_SESSION_ID, "createdAt": DSH_FIXTURE_CREATED_AT, "cwd": "/home/user/project"}),
+        json.dumps({
+            "type": "user/message",
+            "seq": 1,
+            "time": DSH_FIXTURE_CREATED_AT + 100,
+            "data": {"content": [{"type": "text", "text": "Real question about the fixture"}], "role": "user"},
+        }),
+        json.dumps({
+            "type": "user/message",
+            "seq": 2,
+            "time": DSH_FIXTURE_CREATED_AT + 101,
+            "data": {"content": [{"type": "text", "text": "<system-reminder>\nInjected workspace instructions.\n</system-reminder>"}], "role": "user"},
+        }),
+        json.dumps({
+            "type": "user/message",
+            "seq": 3,
+            "time": DSH_FIXTURE_CREATED_AT + 102,
+            "data": {"content": [{"type": "text", "text": "<system-reminder>note</system-reminder>\nActual text beside a reminder"}], "role": "user"},
+        }),
+    ]
+    (session_dir / "session.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    parsed = parse_dsh_session_file(session_dir / "session.jsonl")
+    assert parsed is not None
+    assert [message.content for message in parsed.record.messages] == [
+        "Real question about the fixture",
+        "Actual text beside a reminder",
+    ]
+
+
+def test_dsh_bare_uuid_directory_is_discovered(tmp_path: Path) -> None:
+    """Session directory ids are not a single namespace; discovery must not
+    require the `session-` prefix (subagent children use bare uuids, and a
+    future harness may mint other shapes)."""
+    sessions_dir = tmp_path / "sessions"
+    _write_dsh_session(sessions_dir, session_id="7d7c1f46-1111-4222-8333-444455556666")
+
+    state = {"dsh": {"sessions": {}}}
+    result = export_dsh(
+        tmp_path / "dsh", state, full=False, dry_run=False, since_date=None, sessions_dir=sessions_dir
+    )
+    assert result["scanned"] == 1
+    assert result["exported"] == 1
+
+
+@pytest.mark.skipif(shutil.which("zstd") is None, reason="zstd binary not available")
+def test_dsh_torn_compressed_tail_still_exports_complete_frames(tmp_path: Path) -> None:
+    """A truncated final Zstandard frame must not fail the session: the durable
+    earlier frames are complete and exportable (crash / mid-append state)."""
+    first_part = "\n".join(json.dumps(event) for event in _dsh_fixture_events()) + "\n"
+    second_part = json.dumps(
+        {
+            "type": "user/message",
+            "seq": 20,
+            "time": DSH_FIXTURE_CREATED_AT + 9000,
+            "data": {"content": [{"type": "text", "text": "Written after the last complete frame"}], "role": "user"},
+        }
+    ) + "\n"
+    frame_one = subprocess.run(["zstd", "-c", "-"], input=first_part.encode(), capture_output=True, check=True).stdout
+    frame_two = subprocess.run(["zstd", "-c", "-"], input=second_part.encode(), capture_output=True, check=True).stdout
+
+    session_dir = tmp_path / "sessions" / "--home-user-project--" / DSH_FIXTURE_SESSION_ID
+    session_dir.mkdir(parents=True)
+    (session_dir / "session.jsonl.zstd").write_bytes(frame_one + frame_two[:-8])
+
+    state = {"dsh": {"sessions": {}}}
+    result = export_dsh(
+        tmp_path / "dsh", state, full=False, dry_run=False, since_date=None, sessions_dir=tmp_path / "sessions"
+    )
+    assert result["exported"] == 1
+    assert "failed" not in result
+    content = next(iter((tmp_path / "dsh").glob("*.md"))).read_text(encoding="utf-8")
+    assert "The fixture is wired correctly." in content
+
+
+def test_dsh_model_attribution_without_request_header(tmp_path: Path) -> None:
+    """Per-message `source` attribution covers sessions where request/header is
+    absent or sparse; user turns inherit the next assistant response's model."""
+    lines = [
+        json.dumps({"type": "session", "version": 0, "id": DSH_FIXTURE_SESSION_ID, "createdAt": DSH_FIXTURE_CREATED_AT, "cwd": "/home/user/project"}),
+        json.dumps({
+            "type": "user/message",
+            "seq": 1,
+            "time": DSH_FIXTURE_CREATED_AT + 100,
+            "data": {"content": [{"type": "text", "text": "Which model are you?"}], "role": "user"},
+        }),
+        json.dumps({
+            "type": "assistant/message",
+            "seq": 2,
+            "time": DSH_FIXTURE_CREATED_AT + 200,
+            "data": {
+                "message": {
+                    "content": [{"type": "text", "text": "fixture-model, at your service."}],
+                    "role": "assistant",
+                    "source": {"kind": "model", "provider": "fixture-provider", "model": "fixture-model"},
+                }
+            },
+        }),
+    ]
+    session_dir = tmp_path / "sessions" / "--home-user-project--" / DSH_FIXTURE_SESSION_ID
+    session_dir.mkdir(parents=True)
+    (session_dir / "session.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    parsed = parse_dsh_session_file(session_dir / "session.jsonl")
+    assert parsed is not None
+    assert [message.model for message in parsed.record.messages] == [
+        "fixture-provider/fixture-model",
+        "fixture-provider/fixture-model",
+    ]
+
+
+def test_dsh_since_date_filters_sessions(tmp_path: Path) -> None:
+    sessions_dir = tmp_path / "sessions"
+    _write_dsh_session(sessions_dir)
+    fixture_date = date.fromisoformat(ms_to_date(DSH_FIXTURE_CREATED_AT))
+
+    state = {"dsh": {"sessions": {}}}
+    after = export_dsh(
+        tmp_path / "dsh", state, full=False, dry_run=False, since_date=fixture_date + timedelta(days=1), sessions_dir=sessions_dir
+    )
+    assert after["exported"] == 0
+
+    before = export_dsh(
+        tmp_path / "dsh", state, full=False, dry_run=False, since_date=fixture_date - timedelta(days=1), sessions_dir=sessions_dir
+    )
+    assert before["exported"] == 1
+
+
+def test_dsh_missing_header_or_messages_is_skipped(tmp_path: Path) -> None:
+    sessions_dir = tmp_path / "sessions"
+
+    no_header_dir = sessions_dir / "--home-user-project--" / "session-noheader00-1111-4222-8333-444455556666"
+    no_header_dir.mkdir(parents=True)
+    (no_header_dir / "session.jsonl").write_text(
+        json.dumps({"type": "user/message", "seq": 1, "time": DSH_FIXTURE_CREATED_AT, "data": {"content": [{"type": "text", "text": "hello"}], "role": "user"}}) + "\n",
+        encoding="utf-8",
+    )
+
+    header_only_dir = sessions_dir / "--home-user-project--" / "session-headeronly0-1111-4222-8333-444455556666"
+    header_only_dir.mkdir(parents=True)
+    (header_only_dir / "session.jsonl").write_text(
+        json.dumps({"type": "session", "version": 0, "id": "session-headeronly0-1111-4222-8333-444455556666", "createdAt": DSH_FIXTURE_CREATED_AT, "cwd": "/home/user/project"}) + "\n",
+        encoding="utf-8",
+    )
+
+    assert parse_dsh_session_file(no_header_dir / "session.jsonl") is None
+    assert parse_dsh_session_file(header_only_dir / "session.jsonl") is None
+
+
+@pytest.mark.skipif(shutil.which("zstd") is None, reason="zstd binary not available")
+def test_dsh_both_encodings_in_one_directory_export_once(tmp_path: Path) -> None:
+    """A configuration change can leave both physical encodings in one session
+    directory; the session must be exported exactly once."""
+    sessions_dir = tmp_path / "sessions"
+    file_path = _write_dsh_session(sessions_dir)
+    compressed = subprocess.run(
+        ["zstd", "-c", "-"], input=file_path.read_bytes(), capture_output=True, check=True
+    ).stdout
+    (file_path.parent / "session.jsonl.zstd").write_bytes(compressed)
+
+    state = {"dsh": {"sessions": {}}}
+    result = export_dsh(
+        tmp_path / "dsh", state, full=False, dry_run=False, since_date=None, sessions_dir=sessions_dir
+    )
+    assert result["exported"] == 1
+    assert len(list((tmp_path / "dsh").glob("*.md"))) == 1
+
+
+def test_dsh_zero_timestamps_is_skipped(tmp_path: Path) -> None:
+    session_dir = tmp_path / "sessions" / "--home-user-project--" / DSH_FIXTURE_SESSION_ID
+    session_dir.mkdir(parents=True)
+    lines = [
+        json.dumps({"type": "session", "version": 0, "id": DSH_FIXTURE_SESSION_ID, "createdAt": 0, "cwd": "/home/user/project"}),
+        json.dumps({"type": "user/message", "seq": 1, "data": {"content": [{"type": "text", "text": "no clock"}], "role": "user"}}),
+    ]
+    (session_dir / "session.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    assert parse_dsh_session_file(session_dir / "session.jsonl") is None
+
+
+@pytest.mark.skipif(shutil.which("zstd") is None, reason="zstd binary not available")
+def test_dsh_compressed_session_exports(tmp_path: Path) -> None:
+    sessions_dir = tmp_path / "sessions"
+    _write_dsh_session(sessions_dir, compressed=True)
+
+    state = {"dsh": {"sessions": {}}}
+    result = export_dsh(
+        tmp_path / "dsh", state, full=False, dry_run=False, since_date=None, sessions_dir=sessions_dir
+    )
+    assert result["exported"] == 1
+    content = next((tmp_path / "dsh").glob("*.md")).read_text(encoding="utf-8")
+    assert "The fixture is wired correctly." in content
+
+
+@pytest.mark.skipif(shutil.which("zstd") is None, reason="zstd binary not available")
+def test_dsh_unreadable_session_is_isolated(tmp_path: Path) -> None:
+    sessions_dir = tmp_path / "sessions"
+    _write_dsh_session(sessions_dir, session_id="session-good-000000-1111-4222-8333-444455556666")
+    bad_dir = sessions_dir / "--home-user-broken--" / "session-bad00000-1111-4222-8333-444455556666"
+    bad_dir.mkdir(parents=True)
+    (bad_dir / "session.jsonl.zstd").write_bytes(b"not a zstd frame")
+
+    state = {"dsh": {"sessions": {}}}
+    result = export_dsh(
+        tmp_path / "dsh", state, full=False, dry_run=False, since_date=None, sessions_dir=sessions_dir
+    )
+    assert result["exported"] == 1
+    assert result["failed"] == 1
+    assert "RuntimeError" in result["warnings"][0]["error"]
+    assert len(list((tmp_path / "dsh").glob("*.md"))) == 1
+
+
 # --------------------------------------------------------------------------- #
 # 3. Integration test (self-contained; also runnable via `pytest -m integration`)
 # --------------------------------------------------------------------------- #
@@ -1210,6 +1600,9 @@ def test_cli_run_export_all_sources(tmp_path: Path) -> None:
     cursor_db = tmp_path / "cursor.vscdb"
     _seed_cursor_db(cursor_db)
 
+    dsh_dir = tmp_path / "dsh_sessions"
+    _write_dsh_session(dsh_dir)
+
     state_file = tmp_path / ".export_state.json"
     results = run_export(
         "all",
@@ -1225,6 +1618,7 @@ def test_cli_run_export_all_sources(tmp_path: Path) -> None:
         codex_session_dirs=(codex_dir,),
         codex_session_index=codex_index,
         cursor_db=cursor_db,
+        dsh_sessions_dir=dsh_dir,
     )
 
     assert {r["source"] for r in results} == {
@@ -1234,10 +1628,11 @@ def test_cli_run_export_all_sources(tmp_path: Path) -> None:
         "antigravity",
         "codex",
         "cursor",
+        "dsh",
     }
 
     # Each source produced at least one markdown file under base_dir.
-    for sub in ("second_mind", "opencode", "claude_code", "antigravity", "codex", "cursor"):
+    for sub in ("second_mind", "opencode", "claude_code", "antigravity", "codex", "cursor", "dsh"):
         assert list((tmp_path / sub).glob("*.md")), f"no markdown emitted for {sub}"
 
     # State file was persisted with refreshed counters.
@@ -1249,6 +1644,7 @@ def test_cli_run_export_all_sources(tmp_path: Path) -> None:
     assert antigravity_sessions["antigravity-session-fixture"]["status"] == "complete"
     assert persisted["codex"]["sessions"]["codex-fixture-1"]["latest_timestamp"] > 0
     assert persisted["cursor"]["sessions"]["a6f723dc-9c5b-4169-b03f-31abb1e6069b"]["latest_timestamp"] > 0
+    assert persisted["dsh"]["sessions"][DSH_FIXTURE_SESSION_ID]["latest_timestamp"] > 0
 
 
 def test_cli_main_reports_partial_antigravity_failure(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
@@ -1264,6 +1660,7 @@ def test_cli_main_reports_partial_antigravity_failure(monkeypatch: pytest.Monkey
         codex_dir=None,
         codex_session_index=Path("/tmp/example-codex-index.jsonl"),
         cursor_db=Path("/tmp/example-cursor.db"),
+        dsh_sessions_dir=Path("/tmp/example-dsh-sessions"),
         since_date=None,
     )
     monkeypatch.setattr(cli_module, "parse_args", lambda: args)
@@ -1417,3 +1814,23 @@ class TestLiveExport:
             pytest.skip("No recent Cursor sessions to export")
         assert len(files) == result["exported"]
         assert "source: cursor" in files[0].read_text(encoding="utf-8")
+
+    def test_live_dsh_export(self, tmp_path: Path) -> None:
+        """Export recent DeepSeek Harness sessions without exposing transcript content."""
+        if not DEFAULT_DSH_SESSIONS_DIR.is_dir():
+            pytest.skip(f"DSH sessions directory not found: {DEFAULT_DSH_SESSIONS_DIR}")
+
+        since = date.today() - timedelta(days=7)
+        result = export_dsh(
+            tmp_path / "dsh",
+            {},
+            full=True,
+            dry_run=False,
+            since_date=since,
+            sessions_dir=DEFAULT_DSH_SESSIONS_DIR,
+        )
+        files = list((tmp_path / "dsh").glob("*.md"))
+        if result["exported"] == 0:
+            pytest.skip("No recent DSH sessions to export")
+        assert len(files) == result["exported"]
+        assert "source: dsh" in files[0].read_text(encoding="utf-8")
