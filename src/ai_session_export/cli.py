@@ -7,10 +7,11 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
-from .sources import export_antigravity, export_claude_code, export_codex, export_cursor, export_opencode, export_second_mind
+from .sources import export_antigravity, export_claude_code, export_codex, export_cursor, export_dsh, export_opencode, export_second_mind
 from .sources.claude_code import DEFAULT_CLAUDE_HISTORY_FILES, DEFAULT_CLAUDE_PROJECT_DIRS
 from .sources.codex import DEFAULT_CODEX_SESSION_DIRS, DEFAULT_CODEX_SESSION_INDEX
 from .sources.cursor import DEFAULT_CURSOR_DB
+from .sources.dsh import DEFAULT_DSH_SESSIONS_DIR
 from .state import load_state, save_state
 from .utils import date_from_cli
 
@@ -20,7 +21,7 @@ SECOND_MIND_JSON = BASE_DIR / "second_mind_export.json"
 STATE_FILE = BASE_DIR / ".export_state.json"
 DEFAULT_OPENCODE_DB = Path.home() / ".local" / "share" / "opencode" / "opencode.db"
 
-SOURCE_CHOICES = ["all", "second-mind", "opencode", "claude-code", "antigravity", "codex", "cursor"]
+SOURCE_CHOICES = ["all", "second-mind", "opencode", "claude-code", "antigravity", "codex", "cursor", "dsh"]
 
 
 def run_export(
@@ -40,6 +41,7 @@ def run_export(
     codex_session_dirs: tuple[Path, ...] | None = None,
     codex_session_index: Path = DEFAULT_CODEX_SESSION_INDEX,
     cursor_db: Path = DEFAULT_CURSOR_DB,
+    dsh_sessions_dir: Path = DEFAULT_DSH_SESSIONS_DIR,
 ) -> list[dict[str, Any]]:
     state = load_state(state_file)
     results: list[dict[str, Any]] = []
@@ -113,6 +115,17 @@ def run_export(
                 since_date=since_date,
             )
         )
+    if source in {"dsh", "all"}:
+        results.append(
+            export_dsh(
+                base_dir / "dsh",
+                state,
+                full=full,
+                dry_run=dry_run,
+                since_date=since_date,
+                sessions_dir=dsh_sessions_dir,
+            )
+        )
 
     if not dry_run:
         save_state(state, state_file)
@@ -151,6 +164,12 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_CURSOR_DB,
         help="Override the Cursor state.vscdb path.",
     )
+    parser.add_argument(
+        "--dsh-sessions-dir",
+        type=Path,
+        default=DEFAULT_DSH_SESSIONS_DIR,
+        help="Override the DeepSeek Harness sessions root (~/.dsh/sessions).",
+    )
     parser.add_argument("--since-date", type=date_from_cli, help="Only export sessions on or after YYYY-MM-DD.")
     return parser.parse_args()
 
@@ -169,6 +188,7 @@ def main() -> None:
         codex_session_dirs=tuple(args.codex_dir) if args.codex_dir else None,
         codex_session_index=args.codex_session_index,
         cursor_db=args.cursor_db,
+        dsh_sessions_dir=args.dsh_sessions_dir,
         since_date=args.since_date,
     )
     for result in results:

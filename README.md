@@ -13,6 +13,7 @@ Export AI coding session transcripts from multiple tools into a unified Markdown
 | Google Antigravity IDE | `~/.gemini/antigravity-ide/brain/*/.system_generated/logs/transcript_full.jsonl` |
 | Google Antigravity CLI | `~/.gemini/antigravity-cli/brain/*/.system_generated/logs/transcript_full.jsonl` |
 | Cursor | `~/Library/Application Support/Cursor/User/globalStorage/state.vscdb` |
+| DeepSeek Harness | `~/.dsh/sessions/*/*/session.jsonl*` |
 | Second Mind | `second_mind_export.json` |
 
 ## Quick Start
@@ -28,6 +29,7 @@ python export_sessions.py
 python export_sessions.py --source antigravity
 python export_sessions.py --source codex
 python export_sessions.py --source cursor
+python export_sessions.py --source dsh
 
 # Full re-export (ignore incremental state)
 python export_sessions.py --full
@@ -48,6 +50,18 @@ repository.
 the `antigravity/` output directory and `source: antigravity`, while optional
 frontmatter `surface` identifies `"2"`, `"ide"`, or `"cli"`. The legacy
 `--antigravity-dir /path/to/brain` override scans one IDE-compatible root.
+
+The DeepSeek Harness source reads each session's append-only event log
+(`session.jsonl.zstd`, or plain `session.jsonl` when compression is disabled;
+session directory ids are not a single namespace, so discovery accepts any id
+shape). It keeps `user/message` and `assistant/message` events (final assembled
+turns, not streaming chunks), takes titles from `session/title` events, and
+attributes models per message from `assistant/message` `source` (falling back
+to `request/header`), back-filling the user turns that triggered each response.
+It drops subagent-child sessions and `<system-reminder>` instruction
+injections, tolerates torn trailing records (including a truncated final
+Zstandard frame), and rewrites one stable file per growing live session.
+Decompression shells out to the `zstd` binary.
 
 ## Output Format
 

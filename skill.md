@@ -2,7 +2,8 @@
 name: ai-session-export
 description: >-
   Export AI coding session transcripts from OpenCode, Claude Code, Codex, Google
-  Antigravity, Cursor, and Second Mind into a unified Markdown archive. Run as a CLI or periodic cron job.
+  Antigravity, Cursor, DeepSeek Harness, and Second Mind into a unified Markdown
+  archive. Run as a CLI or periodic cron job.
 ---
 
 # AI Session Export Skill
@@ -21,6 +22,7 @@ archive for browsing, semantic search, and downstream workflows.
 
 - Python 3.11+
 - Dependencies: none beyond the standard library (sqlite3, json, pathlib)
+- The DeepSeek Harness source needs the `zstd` binary on PATH for compressed session logs
 - For tests: `pytest` (install via `uv pip install -e '.[dev]'`)
 
 ## Commands
@@ -35,6 +37,7 @@ python export_sessions.py
 python export_sessions.py --source antigravity
 python export_sessions.py --source codex
 python export_sessions.py --source cursor
+python export_sessions.py --source dsh
 
 # Full re-export (ignore incremental cursor)
 python export_sessions.py --full
@@ -50,6 +53,7 @@ python export_sessions.py --opencode-db /path/to/opencode.db
 python export_sessions.py --antigravity-dir /path/to/brain
 python export_sessions.py --codex-dir /path/to/codex/sessions
 python export_sessions.py --cursor-db /path/to/state.vscdb
+python export_sessions.py --dsh-sessions-dir /path/to/.dsh/sessions
 ```
 
 The Antigravity source scans 2.0, IDE, and CLI by default. `--antigravity-dir`
@@ -102,6 +106,7 @@ Antigravity emits `surface` as `"2"`, `"ide"`, or `"cli"`.
 | Antigravity IDE | `~/.gemini/antigravity-ide/brain/*/.system_generated/logs/transcript_full.jsonl` | JSONL |
 | Antigravity CLI | `~/.gemini/antigravity-cli/brain/*/.system_generated/logs/transcript_full.jsonl` | JSONL |
 | Cursor | `~/Library/Application Support/Cursor/User/globalStorage/state.vscdb` | SQLite |
+| DeepSeek Harness | `~/.dsh/sessions/*/*/session.jsonl*` | Zstandard-compressed JSONL |
 | Second Mind | `./second_mind_export.json` | JSON |
 
 ## Adding a New Source
