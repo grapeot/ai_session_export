@@ -12,6 +12,15 @@ from ..utils import parse_iso_timestamp, should_skip_session, unique_output_path
 
 DEFAULT_GEMINI_DIR = Path.home() / ".gemini" / "tmp"
 
+IGNORED_USER_PREFIXES = ("/", "?", "<session_context>", "<hook_context>")
+
+
+def _ignored_user_content(text: str) -> bool:
+    # Mirrors gemini-cli isIgnoredUserContent: slash/help commands and
+    # machine-injected context blocks are CLI machinery, not user conversation.
+    trimmed = text.strip()
+    return not trimmed or trimmed.startswith(IGNORED_USER_PREFIXES)
+
 
 def _text(content: Any) -> str:
     if isinstance(content, str):
@@ -31,7 +40,10 @@ def _load_conversation(file_path: Path) -> dict[str, Any]:
         if not isinstance(record, dict):
             raise ValueError("invalid conversation object")
         return record
+    return _replay_jsonl(file_path)
 
+
+def _replay_jsonl(file_path: Path) -> dict[str, Any]:
     metadata: dict[str, Any] = {}
     messages: dict[str, dict[str, Any]] = {}
     with file_path.open(encoding="utf-8") as handle:
@@ -64,6 +76,12 @@ def _load_conversation(file_path: Path) -> dict[str, Any]:
     return {**metadata, "messages": list(messages.values())}
 
 
+def _display_text(item: dict[str, Any]) -> str:
+    # The UI falls back to the raw content whenever the display text is empty.
+    display = _text(item.get("displayContent")).strip() if item.get("displayContent") is not None else ""
+    return display or _text(item.get("content")).strip()
+
+
 def parse_gemini_session_file(file_path: Path) -> SessionRecord | None:
     data = _load_conversation(file_path)
     if data.get("kind") == "subagent":
@@ -83,11 +101,13 @@ def parse_gemini_session_file(file_path: Path) -> SessionRecord | None:
         if model:
             models.add(model)
         # Display content is the provider's user-facing text, before context expansion.
-        content = _text(item.get("displayContent") if item.get("displayContent") is not None else item.get("content")).strip()
+        content = _display_text(item)
         if item["type"] == "gemini":
             for index in pending_users:
                 messages[index] = messages[index]._replace(model=model)
             pending_users.clear()
+        if item["type"] == "user" and _ignored_user_content(content):
+            continue
         if not content:
             continue
         timestamp = parse_iso_timestamp(str(item.get("timestamp") or ""))
@@ -110,21 +130,60 @@ def parse_gemini_session_file(file_path: Path) -> SessionRecord | None:
                          models_used=sorted(models))
 
 
+def _replayed_message_count(file_path: Path) -> int | None:
+    """Count messages the loader would keep after replaying replacements/checkpoints/rewinds."""
+    try:
+        if file_path.suffix == ".json":
+            record = json.loads(file_path.read_text(encoding="utf-8"))
+            messages = record.get("messages") if isinstance(record, dict) else None
+            return len(messages) if isinstance(messages, list) else None
+        return len(_replay_jsonl(file_path).get("messages", []))
+    except (OSError, ValueError, TypeError):
+        return None
+
+
 def export_gemini(
     output_dir: Path, state: dict[str, Any], *, full: bool, dry_run: bool,
     since_date: date | None, gemini_dir: Path = DEFAULT_GEMINI_DIR,
 ) -> dict[str, Any]:
-    files = sorted(gemini_dir.glob("*/chats/*.json*")) if gemini_dir.is_dir() else []
-    # A migration leaves a legacy JSON alongside its JSONL successor.
-    files = [path for path in files if path.suffix in {".json", ".jsonl"}
-             and not (path.suffix == ".json" and path.with_suffix(".jsonl").is_file())]
+    candidates = sorted(gemini_dir.glob("*/chats/*.json*")) if gemini_dir.is_dir() else []
+    candidates = [path for path in candidates if path.suffix in {".json", ".jsonl"}]
+    files: list[Path] = []
+    migration_fallbacks = 0
+    pending_json: dict[str, Path] = {}
+    for path in candidates:
+        if path.suffix == ".json":
+            pending_json[path.with_suffix("").name] = path
+            continue
+        # A migration leaves a legacy JSON alongside its JSONL successor, and the
+        # JSONL is appended incrementally (metadata then messages). Prefer the
+        # JSONL only when its replayed message set has caught up with the JSON's;
+        # while mid-migration the JSON still holds the most complete conversation.
+        jsonl_count = _replayed_message_count(path)
+        json_path = path.with_suffix(".json")
+        json_count = _replayed_message_count(json_path) if json_path.is_file() else None
+        if json_count is None or (jsonl_count is not None and jsonl_count >= json_count):
+            files.append(path)
+            pending_json.pop(path.with_suffix("").name, None)
+        else:
+            files.append(json_path)
+            pending_json.pop(json_path.with_suffix("").name, None)
+            migration_fallbacks += 1
+    files.extend(pending_json.values())
     sessions = state.get("gemini", {}).get("sessions", {})
     exported = failed = 0
+    warnings: list[dict[str, Any]] = []
     seen: set[str] = set()
     for path in files:
         try:
             record = parse_gemini_session_file(path)
-            if record is None or record.session_id in seen:
+            if record is None:
+                stale = _retire_if_rewound_empty(path, output_dir, sessions,
+                                                 since_date=since_date, dry_run=dry_run)
+                if stale:
+                    warnings.append(stale)
+                continue
+            if record.session_id in seen:
                 continue
             seen.add(record.session_id)
             if since_date and date.fromisoformat(record.date) < since_date:
@@ -139,9 +198,139 @@ def export_gemini(
                 output.write_text(rendered, encoding="utf-8")
                 state.setdefault("gemini", {}).setdefault("sessions", {})[record.session_id] = {"output_file": output.name}
             exported += 1
-        except (OSError, ValueError, TypeError):
+        except Exception as error:  # noqa: BLE001 - isolate one unreadable session
             failed += 1
+            warnings.append({"path": str(path), "error": f"{type(error).__name__}: {error}"})
     result = {"source": "gemini", "scanned": len(files), "exported": exported}
     if failed:
         result["failed"] = failed
+    if migration_fallbacks:
+        result["migration_fallbacks"] = migration_fallbacks
+    if warnings:
+        result["warnings"] = warnings
     return result
+
+
+def _json_rewound_to_nothing(record: dict[str, Any]) -> bool:
+    """True when the JSON snapshot's messages were all removed (rewind to before the first prompt)."""
+    messages = record.get("messages")
+    return isinstance(messages, list) and len(messages) == 0
+
+
+def _retire_if_rewound_empty(
+    source_path: Path, output_dir: Path, sessions: dict[str, Any],
+    *, since_date: date | None, dry_run: bool,
+) -> dict[str, Any] | None:
+    """Retire a stale archive only when the source proves a rewind emptied the conversation.
+
+    A parser-None can mean many things (noise title, subagent kind, missing id); only a
+    raw rewind marker that wiped every message is provider-side deletion of a session
+    this exporter previously archived. Archives outside `since_date` are never touched.
+    """
+    if source_path.suffix == ".json":
+        try:
+            raw = json.loads(source_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        rewound_empty = isinstance(raw, dict) and _json_rewound_to_nothing(raw)
+        session_id = raw.get("sessionId") if isinstance(raw, dict) else None
+    else:
+        rewound_empty = _jsonl_has_trailing_rewind(source_path)
+        session_id = _read_session_id(source_path)
+    if not rewound_empty:
+        return None
+    if not isinstance(session_id, str) or not session_id:
+        return None
+    path_state = sessions.get(session_id)
+    output_file = path_state.get("output_file") if isinstance(path_state, dict) else None
+    if not isinstance(output_file, str) or not output_file:
+        return None
+    if since_date:
+        # Honor the date scope: the archive was exported under a prior date; if the
+        # session's own start predates since_date, its archive is out of scope.
+        started = parse_iso_timestamp(_read_start_time(source_path))
+        if started is None or started.date() < since_date:
+            return None
+    if dry_run:
+        return {"path": str(source_path), "session_id": session_id,
+                "error": "stale archive after rewind cleared the session (dry-run, not removed)"}
+    output = output_dir / output_file
+    if output.is_file():
+        output.unlink()
+    sessions.pop(session_id, None)
+    return {"path": str(source_path), "session_id": session_id,
+            "error": "retired stale archive after rewind cleared the session"}
+
+
+def _jsonl_has_trailing_rewind(file_path: Path) -> bool:
+    """True when the JSONL log's surviving state is a rewind that wiped every message."""
+    try:
+        replayed = _replay_jsonl(file_path)
+    except (OSError, ValueError, TypeError):
+        return False
+    messages = replayed.get("messages")
+    return isinstance(messages, list) and len(messages) == 0 and _jsonl_seen_rewind(file_path)
+
+
+def _jsonl_seen_rewind(file_path: Path) -> bool:
+    try:
+        with file_path.open(encoding="utf-8") as handle:
+            for line in handle:
+                try:
+                    item = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(item, dict) and "$rewindTo" in item:
+                    return True
+    except OSError:
+        return False
+    return False
+
+
+def _read_session_id(file_path: Path) -> str | None:
+    """Read the raw sessionId without full conversation replay."""
+    if file_path.suffix == ".json":
+        try:
+            record = json.loads(file_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        return record.get("sessionId") if isinstance(record, dict) and isinstance(record.get("sessionId"), str) else None
+    try:
+        with file_path.open(encoding="utf-8") as handle:
+            for line in handle:
+                try:
+                    item = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(item, dict):
+                    session_id = item.get("sessionId")
+                    if isinstance(session_id, str) and session_id:
+                        return session_id
+                    update = item.get("$set")
+                    if isinstance(update, dict) and isinstance(update.get("sessionId"), str):
+                        return update["sessionId"]
+    except OSError:
+        return None
+    return None
+
+
+def _read_start_time(file_path: Path) -> str | None:
+    """Read the raw startTime without full conversation replay."""
+    if file_path.suffix == ".json":
+        try:
+            record = json.loads(file_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        return record.get("startTime") if isinstance(record, dict) else None
+    try:
+        with file_path.open(encoding="utf-8") as handle:
+            for line in handle:
+                try:
+                    item = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(item, dict) and item.get("startTime") is not None:
+                    return str(item["startTime"])
+    except OSError:
+        return None
+    return None

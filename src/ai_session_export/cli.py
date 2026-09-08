@@ -218,9 +218,13 @@ def main() -> None:
             failure_summary = f" failed={failed}" if failed else ""
             print(f"[{source}] exported={result['exported']} scanned={result['scanned']}{failure_summary}{suffix}")
             for warning in result.get("warnings", []):
-                print(
-                    f"[{source}:{warning['surface']}] line {warning['line']}: {warning['error']}",
-                    file=sys.stderr,
-                )
+                if "surface" in warning:
+                    print(
+                        f"[{source}:{warning['surface']}] line {warning['line']}: {warning['error']}",
+                        file=sys.stderr,
+                    )
+                else:
+                    detail = warning.get("session_id", warning.get("path", ""))
+                    print(f"[{source}] {detail}: {warning['error']}", file=sys.stderr)
     if any(int(result.get("failed", 0)) for result in results):
         raise SystemExit(1)
