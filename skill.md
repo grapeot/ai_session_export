@@ -2,7 +2,7 @@
 name: ai-session-export
 description: >-
   Export AI coding session transcripts from OpenCode, Claude Code, Codex, Google
-  Antigravity, Cursor, DeepSeek Harness, and Second Mind into a unified Markdown
+  Antigravity, Cursor, DeepSeek Harness, Gemini CLI, Grok Build, and Second Mind into a unified Markdown
   archive. Run as a CLI or periodic cron job.
 ---
 
@@ -38,6 +38,8 @@ python export_sessions.py --source antigravity
 python export_sessions.py --source codex
 python export_sessions.py --source cursor
 python export_sessions.py --source dsh
+python export_sessions.py --source gemini
+python export_sessions.py --source grok
 
 # Full re-export (ignore incremental cursor)
 python export_sessions.py --full
@@ -54,6 +56,8 @@ python export_sessions.py --antigravity-dir /path/to/brain
 python export_sessions.py --codex-dir /path/to/codex/sessions
 python export_sessions.py --cursor-db /path/to/state.vscdb
 python export_sessions.py --dsh-sessions-dir /path/to/.dsh/sessions
+python export_sessions.py --gemini-dir /path/to/.gemini/tmp
+python export_sessions.py --grok-sessions-dir /path/to/.grok/sessions
 ```
 
 The Antigravity source scans 2.0, IDE, and CLI by default. `--antigravity-dir`
@@ -107,6 +111,8 @@ Antigravity emits `surface` as `"2"`, `"ide"`, or `"cli"`.
 | Antigravity CLI | `~/.gemini/antigravity-cli/brain/*/.system_generated/logs/transcript_full.jsonl` | JSONL |
 | Cursor | `~/Library/Application Support/Cursor/User/globalStorage/state.vscdb` | SQLite |
 | DeepSeek Harness | `~/.dsh/sessions/*/*/session.jsonl*` | Zstandard-compressed JSONL |
+| Gemini CLI | `~/.gemini/tmp/*/chats/session-*.json` or `.jsonl` | JSON / JSONL |
+| Grok Build | `~/.grok/sessions/*/*/updates.jsonl` + `summary.json` | JSONL + JSON |
 | Second Mind | `./second_mind_export.json` | JSON |
 
 ## Adding a New Source

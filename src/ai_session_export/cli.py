@@ -12,6 +12,8 @@ from .sources.claude_code import DEFAULT_CLAUDE_HISTORY_FILES, DEFAULT_CLAUDE_PR
 from .sources.codex import DEFAULT_CODEX_SESSION_DIRS, DEFAULT_CODEX_SESSION_INDEX
 from .sources.cursor import DEFAULT_CURSOR_DB
 from .sources.dsh import DEFAULT_DSH_SESSIONS_DIR
+from .sources.gemini import DEFAULT_GEMINI_DIR, export_gemini
+from .sources.grok import DEFAULT_GROK_SESSIONS_DIR, export_grok
 from .state import load_state, save_state
 from .utils import date_from_cli
 
@@ -21,7 +23,7 @@ SECOND_MIND_JSON = BASE_DIR / "second_mind_export.json"
 STATE_FILE = BASE_DIR / ".export_state.json"
 DEFAULT_OPENCODE_DB = Path.home() / ".local" / "share" / "opencode" / "opencode.db"
 
-SOURCE_CHOICES = ["all", "second-mind", "opencode", "claude-code", "antigravity", "codex", "cursor", "dsh"]
+SOURCE_CHOICES = ["all", "second-mind", "opencode", "claude-code", "antigravity", "codex", "cursor", "dsh", "gemini", "grok"]
 
 
 def run_export(
@@ -42,6 +44,8 @@ def run_export(
     codex_session_index: Path = DEFAULT_CODEX_SESSION_INDEX,
     cursor_db: Path = DEFAULT_CURSOR_DB,
     dsh_sessions_dir: Path = DEFAULT_DSH_SESSIONS_DIR,
+    gemini_dir: Path = DEFAULT_GEMINI_DIR,
+    grok_sessions_dir: Path = DEFAULT_GROK_SESSIONS_DIR,
 ) -> list[dict[str, Any]]:
     state = load_state(state_file)
     results: list[dict[str, Any]] = []
@@ -127,6 +131,13 @@ def run_export(
             )
         )
 
+    if source in {"gemini", "all"}:
+        results.append(export_gemini(base_dir / "gemini", state, full=full, dry_run=dry_run,
+                                     since_date=since_date, gemini_dir=gemini_dir))
+    if source in {"grok", "all"}:
+        results.append(export_grok(base_dir / "grok", state, full=full, dry_run=dry_run,
+                                   since_date=since_date, sessions_dir=grok_sessions_dir))
+
     if not dry_run:
         save_state(state, state_file)
     return results
@@ -170,6 +181,10 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_DSH_SESSIONS_DIR,
         help="Override the DeepSeek Harness sessions root (~/.dsh/sessions).",
     )
+    parser.add_argument("--gemini-dir", type=Path, default=DEFAULT_GEMINI_DIR,
+                        help="Override the Gemini CLI temporary project root.")
+    parser.add_argument("--grok-sessions-dir", type=Path, default=DEFAULT_GROK_SESSIONS_DIR,
+                        help="Override the Grok Build sessions root.")
     parser.add_argument("--since-date", type=date_from_cli, help="Only export sessions on or after YYYY-MM-DD.")
     return parser.parse_args()
 
@@ -189,6 +204,8 @@ def main() -> None:
         codex_session_index=args.codex_session_index,
         cursor_db=args.cursor_db,
         dsh_sessions_dir=args.dsh_sessions_dir,
+        gemini_dir=args.gemini_dir,
+        grok_sessions_dir=args.grok_sessions_dir,
         since_date=args.since_date,
     )
     for result in results:
@@ -201,9 +218,13 @@ def main() -> None:
             failure_summary = f" failed={failed}" if failed else ""
             print(f"[{source}] exported={result['exported']} scanned={result['scanned']}{failure_summary}{suffix}")
             for warning in result.get("warnings", []):
-                print(
-                    f"[{source}:{warning['surface']}] line {warning['line']}: {warning['error']}",
-                    file=sys.stderr,
-                )
+                if "surface" in warning:
+                    print(
+                        f"[{source}:{warning['surface']}] line {warning['line']}: {warning['error']}",
+                        file=sys.stderr,
+                    )
+                else:
+                    detail = warning.get("session_id", warning.get("path", ""))
+                    print(f"[{source}] {detail}: {warning['error']}", file=sys.stderr)
     if any(int(result.get("failed", 0)) for result in results):
         raise SystemExit(1)

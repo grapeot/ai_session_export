@@ -1,5 +1,32 @@
 ## Changelog
 
+### 2026-09-08 (maintainer review round 2)
+
+- Stale-archive retirement is now provable-rewind-only: Gemini retires when the JSON snapshot's messages were emptied or the JSONL replay ends in a rewind with no surviving messages; Grok retires when a `rewind_marker` trail leaves no surviving prompt runs. Noise-title rewrites, subagent kinds, and other parser rejections no longer delete archives, and `--since-date` scopes retirement by session start time.
+- Gemini migration comparison now replays the JSONL (direct messages, same-id replacements, `$set.messages` checkpoints, `$rewindTo`) instead of counting raw lines, so interrupted migrations and duplicate-id replay both pick the more complete source.
+- Per-file failure isolation widened to `except Exception` (aligning with DSH): malformed JSON floats (e.g. `1e309` timestamps) can raise `OverflowError`, which previously aborted the whole run before `save_state`.
+- Grok hidden user echoes now advance the prompt-model state before being dropped, so a runtime wake on a new model attributes the following assistant turn correctly; `rewind_marker` resets both the stitching key and the model-attribution state.
+- Added regression tests: noise-title rename survival, since-date retirement scoping, checkpoint/duplicate-id migration, hidden-prompt model attribution, rewind stitching boundary, `OverflowError` isolation.
+
+### 2026-09-08 (maintainer review pass)
+
+- Gemini adapter drops machine-injected user content (`<session_context>`, `<hook_context>`, slash/help commands), mirroring gemini-cli's `isIgnoredUserContent`; hook output and environment context no longer enter the archive as user turns.
+- Gemini adapter falls back to raw `content` whenever `displayContent` yields empty text, matching the UI's `displayContentString || contentString` semantics.
+- Gemini JSON→JSONL migration: a same-name JSONL now only supersedes the legacy JSON once its replayed message count catches up; mid-migration sessions export from the JSON instead of silently truncating.
+- Grok adapter hides model-only user echoes by prompt-id prefix (`task-completed-`, `subagent-completed-`, `workflow-completed-`, `notifications-`, `goal-summary-`, `goal-classifier-nudge-`) and by legacy bare auto-wake text (`<system-reminder>`, `<monitor-event>`, monitor-drain heads), matching the upstream scrollback policy.
+- Grok adapter treats any `session_kind` starting with `subagent` (including `subagent_resume`) as hidden, matching upstream `Summary::is_hidden()` prefix semantics.
+- Grok adapter attributes per-turn models from chunk `_meta.modelId` (user turn + preceding unmatched turns), keeping `turn_models` populated across mid-session model switches; the summary's `current_model_id` is merged into `models_used` as session inventory only.
+- Both adapters retire a previously exported session's archive file (and state entry) when a rewind empties the live conversation, so dead branches do not linger after the provider deleted them; dry-run reports the retirement without deleting.
+- Both adapters report per-file failure diagnostics (`path` + exception type/message) as `warnings`, aligned with the DSH adapter's diagnosability; the CLI prints them to stderr.
+- Registered both sources in the public `skill.md` data-location table.
+
+### 2026-09-08
+
+- Support for `gemini` source adapter (`--source gemini`, `--gemini-dir`) matching public structures in `google-gemini/gemini-cli` (reading JSON/JSONL, replaying checkpoints/rewinds, filtering subagents/tools/thoughts).
+- Support for `grok` source adapter (`--source grok`, `--grok-sessions-dir`) matching public structures in `xai-org/grok-build` (parsing `updates.jsonl` and `summary.json`, stitching streaming text, obeying rewinds, omitting thoughts/hidden host prompts).
+- Common stability features: stable output paths, dry-run safety, zero-byte writes for unchanged files, and counted/retryable malformed sessions.
+- Improves Grok Build rewind fidelity and introduces isolated failure handling and retry after repair for malformed sessions.
+
 ### 2026-08-14
 
 - Added the DeepSeek Harness source adapter (`src/ai_session_export/sources/dsh.py`), registered in `sources/__init__.py`, `cli.py`, and `state.py` (`DEFAULT_STATE`).
@@ -52,6 +79,12 @@
 - Added `docs/` with `prd.md`, `rfc.md`, `test.md`, and this file.
 
 ## Lessons Learned
+
+### Key Learnings: Stateful CLI Integration
+
+1. **Replay-based Reconstruction**: Both Gemini CLI and Grok Build maintain history as sequential transition logs (events, replacements, and rewinds) rather than static snapshots. Reconstructing clean conversations requires sequentially replaying these mutations rather than simple log stitching.
+2. **Omission of Auxiliary Tracks**: Users expect clean, readable Markdown. Internal cognitive tracks (thoughts, tools, hidden host system prompts, subagent sub-trees) must be systematically stripped during processing to preserve a pure User/Assistant dialogue.
+3. **Idempotence and Stability**: By mapping variable states (such as rewinds or growing lists) to a stable output filepath, and verifying contents before writing, the exporter prevents redundant disk operations and file thrashing.
 
 - **A product family is not one incremental domain.** Antigravity 2.0, IDE, and CLI use related transcript formats but write independently. A shared maximum timestamp can suppress unseen sessions from another surface; state must be scoped by surface and session.
 - **A parse failure is state, not just an exception.** Continuing past one bad transcript is necessary, but marking a partial session complete would make the data loss permanent. Failed fingerprints stay retryable and make cron report partial success explicitly.
