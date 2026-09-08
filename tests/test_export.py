@@ -1633,6 +1633,8 @@ def test_cli_run_export_all_sources(tmp_path: Path) -> None:
         codex_session_index=codex_index,
         cursor_db=cursor_db,
         dsh_sessions_dir=dsh_dir,
+        gemini_dir=tmp_path / "absent-gemini",
+        grok_sessions_dir=tmp_path / "absent-grok",
     )
 
     assert {r["source"] for r in results} == {
@@ -1643,6 +1645,8 @@ def test_cli_run_export_all_sources(tmp_path: Path) -> None:
         "codex",
         "cursor",
         "dsh",
+        "gemini",
+        "grok",
     }
 
     # Each source produced at least one markdown file under base_dir.
@@ -1675,6 +1679,8 @@ def test_cli_main_reports_partial_antigravity_failure(monkeypatch: pytest.Monkey
         codex_session_index=Path("/tmp/example-codex-index.jsonl"),
         cursor_db=Path("/tmp/example-cursor.db"),
         dsh_sessions_dir=Path("/tmp/example-dsh-sessions"),
+        gemini_dir=Path("/tmp/example-gemini"),
+        grok_sessions_dir=Path("/tmp/example-grok-sessions"),
         since_date=None,
     )
     monkeypatch.setattr(cli_module, "parse_args", lambda: args)

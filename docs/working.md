@@ -1,5 +1,12 @@
 ## Changelog
 
+### 2026-09-08
+
+- Support for `gemini` source adapter (`--source gemini`, `--gemini-dir`) matching public structures in `google-gemini/gemini-cli` (reading JSON/JSONL, replaying checkpoints/rewinds, filtering subagents/tools/thoughts).
+- Support for `grok` source adapter (`--source grok`, `--grok-sessions-dir`) matching public structures in `xai-org/grok-build` (parsing `updates.jsonl` and `summary.json`, stitching streaming text, obeying rewinds, omitting thoughts/hidden host prompts).
+- Common stability features: stable output paths, dry-run safety, zero-byte writes for unchanged files, and counted/retryable malformed sessions.
+- Improves Grok Build rewind fidelity and introduces isolated failure handling and retry after repair for malformed sessions.
+
 ### 2026-08-14
 
 - Added the DeepSeek Harness source adapter (`src/ai_session_export/sources/dsh.py`), registered in `sources/__init__.py`, `cli.py`, and `state.py` (`DEFAULT_STATE`).
@@ -52,6 +59,12 @@
 - Added `docs/` with `prd.md`, `rfc.md`, `test.md`, and this file.
 
 ## Lessons Learned
+
+### Key Learnings: Stateful CLI Integration
+
+1. **Replay-based Reconstruction**: Both Gemini CLI and Grok Build maintain history as sequential transition logs (events, replacements, and rewinds) rather than static snapshots. Reconstructing clean conversations requires sequentially replaying these mutations rather than simple log stitching.
+2. **Omission of Auxiliary Tracks**: Users expect clean, readable Markdown. Internal cognitive tracks (thoughts, tools, hidden host system prompts, subagent sub-trees) must be systematically stripped during processing to preserve a pure User/Assistant dialogue.
+3. **Idempotence and Stability**: By mapping variable states (such as rewinds or growing lists) to a stable output filepath, and verifying contents before writing, the exporter prevents redundant disk operations and file thrashing.
 
 - **A product family is not one incremental domain.** Antigravity 2.0, IDE, and CLI use related transcript formats but write independently. A shared maximum timestamp can suppress unseen sessions from another surface; state must be scoped by surface and session.
 - **A parse failure is state, not just an exception.** Continuing past one bad transcript is necessary, but marking a partial session complete would make the data loss permanent. Failed fingerprints stay retryable and make cron report partial success explicitly.

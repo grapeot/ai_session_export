@@ -14,6 +14,8 @@ DEFAULT_STATE = {
     "antigravity": {"last_timestamp": 0, "legacy_cursor_migrated": False, "surfaces": {}},
     "cursor": {"sessions": {}},
     "dsh": {"sessions": {}},
+    "gemini": {"sessions": {}},
+    "grok": {"sessions": {}},
 }
 
 
