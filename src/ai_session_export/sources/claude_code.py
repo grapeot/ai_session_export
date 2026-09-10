@@ -7,7 +7,7 @@ from typing import Any, NamedTuple
 
 from ..markdown import render_markdown
 from ..models import MessageTurn, SessionRecord
-from ..utils import parse_iso_timestamp, should_skip_session, unique_output_path
+from ..utils import parse_iso_timestamp, sanitize_filename, should_skip_session, unique_output_path
 
 
 DEFAULT_CLAUDE_PROJECT_DIRS = (
@@ -187,12 +187,15 @@ def export_claude_code(
 ) -> dict[str, Any]:
     history_titles = _load_history_titles(history_files)
     session_files = _iter_session_files(project_dirs)
-    last_timestamp = int(state.get("claude_code", {}).get("last_timestamp", 0))
+    source_state = state.get("claude_code", {}) if dry_run else state.setdefault("claude_code", {})
+    sessions = source_state.get("sessions", {}) if dry_run else source_state.setdefault("sessions", {})
+    identity_index: dict[str, list[str]] | None = None
 
     exported = 0
     scanned = 0
-    latest_seen = last_timestamp
-    output_dir.mkdir(parents=True, exist_ok=True)
+    latest_seen = 0
+    if not dry_run:
+        output_dir.mkdir(parents=True, exist_ok=True)
 
     for file_path in session_files:
         parsed = parse_claude_session_file(file_path, history_titles)
@@ -200,16 +203,63 @@ def export_claude_code(
             continue
         scanned += 1
         latest_seen = max(latest_seen, parsed.latest_timestamp_ms)
-        if not full and parsed.latest_timestamp_ms <= last_timestamp:
-            continue
         if since_date and date.fromisoformat(parsed.record.date) < since_date:
             continue
-        output_path = unique_output_path(output_dir, parsed.record.date, parsed.record.title)
-        if not dry_run:
-            output_path.write_text(render_markdown(parsed.record), encoding="utf-8")
-        exported += 1
 
-    if not dry_run:
-        state.setdefault("claude_code", {})["last_timestamp"] = latest_seen
+        session_id = parsed.record.session_id
+        previous = sessions.get(session_id, {})
+        previous_timestamp = int(previous.get("latest_timestamp", 0))
+        previous_output = str(previous.get("output_file") or "")
+        output_path = output_dir / previous_output if previous_output else None
+        output_exists = output_path is not None and output_path.is_file()
+        if not full and parsed.latest_timestamp_ms <= previous_timestamp and output_exists:
+            continue
+
+        if not previous_output:
+            if identity_index is None:
+                identity_index = {}
+                for archive in output_dir.glob("*.md"):
+                    try:
+                        with archive.open("r", encoding="utf-8") as handle:
+                            if handle.readline().strip() != "---":
+                                continue
+                            metadata = {}
+                            for line in handle:
+                                if line.strip() == "---":
+                                    break
+                                key, _, value = line.partition(":")
+                                if key in {"source", "session_id"}:
+                                    value = value.strip()
+                                    metadata[key] = json.loads(value) if value.startswith('"') else value
+                            else:
+                                continue
+                        archive_id = metadata.get("session_id")
+                        if metadata.get("source") == "claude_code" and isinstance(archive_id, str) and archive_id:
+                            identity_index.setdefault(archive_id, []).append(archive.name)
+                    except (OSError, UnicodeError, json.JSONDecodeError):
+                        continue
+            candidates = identity_index.get(session_id, [])
+            if candidates:
+                canonical = f"{parsed.record.date.replace('-', '')}_{sanitize_filename(parsed.record.title)}.md"
+                output_path = output_dir / min(
+                    candidates,
+                    key=lambda name: (
+                        name != canonical,
+                        int(Path(name).stem.rsplit("_", 1)[-1])
+                        if Path(name).stem.rsplit("_", 1)[-1].isdigit() else 1,
+                        name,
+                    ),
+                )
+            else:
+                output_path = unique_output_path(output_dir, parsed.record.date, parsed.record.title)
+        if not dry_run:
+            file_mtime_ns = file_path.stat().st_mtime_ns
+            output_path.write_text(render_markdown(parsed.record), encoding="utf-8")
+            sessions[session_id] = {
+                "latest_timestamp": parsed.latest_timestamp_ms,
+                "output_file": output_path.name,
+                "source_mtime_ns": file_mtime_ns,
+            }
+        exported += 1
 
     return {"source": "claude_code", "scanned": scanned, "exported": exported, "latest_seen": latest_seen}

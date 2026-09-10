@@ -50,7 +50,7 @@ The primary users are individual developers who run multiple AI coding agents lo
 | Source | Native Data Location | Incremental Cursor |
 |---|---|---|
 | OpenCode | `~/.local/share/opencode/opencode.db` (SQLite) | `opencode.last_session_time` (ms epoch) |
-| Claude Code | `~/.claude/projects/**/*.jsonl` plus history at `~/.claude/history.jsonl` | `claude_code.last_timestamp` (ms epoch) |
+| Claude Code | `~/.claude/projects/**/*.jsonl` plus history at `~/.claude/history.jsonl` | Per-session latest timestamp, stable output filename, and recorded source mtime; existing archives are adopted by frontmatter identity on upgrade, including under `--full` |
 | Codex | `~/.codex/sessions/**/*.jsonl`, `~/.codex/archived_sessions/*.jsonl`, and `~/.codex/session_index.jsonl` | Per-session latest timestamp, output filename, and source mtime |
 | Google Antigravity | `~/.gemini/antigravity/brain/*/.system_generated/logs/transcript_full.jsonl` (2.0), `~/.gemini/antigravity-ide/brain/*/...` (IDE), and `~/.gemini/antigravity-cli/brain/*/...` (CLI) | Per-surface, per-session source fingerprint, parse status, latest timestamp, and output filename |
 | Cursor | `~/Library/Application Support/Cursor/User/globalStorage/state.vscdb` (SQLite) | Per-session latest timestamp and output filename |

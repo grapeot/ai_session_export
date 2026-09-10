@@ -51,7 +51,7 @@ Each adapter follows the same contract: a function `export_<name>(output_dir, st
 |---|---|---|
 | `second_mind.py` | A single JSON array export at `second_mind_export.json`. | `json.loads` the whole file; each element is one conversation with `title`, `created_at`, and a `messages` list of `{role, content}`. Drops any non-`user`/`assistant` role. Incremental cursor is the count of conversations already seen (`last_export_count`). |
 | `opencode.py` | SQLite database at `~/.local/share/opencode/opencode.db`, opened read-only via the `file:...?mode=ro` URI. | Joins `session` -> `message` -> `part`. Text parts (`json_extract(data, '$.type') == 'text'`) are concatenated per message; each message's native model metadata is retained on its turn. Sessions with zero user turns are skipped. Noise titles (sub-agent chatter) are filtered via `utils.should_skip_session`. Cursor is `session.time_created` (`last_session_time`). |
-| `claude_code.py` | JSONL session files under `~/.claude/projects/**/*.jsonl`, plus `history.jsonl` for human-readable titles. | Iterates session files (excluding anything under a `subagents/` path). Each line is one event; `user` and `assistant` events produce turns, `isSidechain` events are skipped. Assistant content is an array that may mix `text` and `tool_use` items — only `text` items survive. `tool_result` user messages produce empty text and are dropped. A following assistant model is assigned to pending user turns. Titles are chosen from the history file when a meaningful `display` exists, otherwise from the first user message. Cursor is the max event timestamp (`last_timestamp`). |
+| `claude_code.py` | JSONL session files under `~/.claude/projects/**/*.jsonl`, plus `history.jsonl` for human-readable titles. | Iterates session files (excluding anything under a `subagents/` path). Each line is one event; `user` and `assistant` events produce turns, `isSidechain` events are skipped. Assistant content is an array that may mix `text` and `tool_use` items — only `text` items survive. `tool_result` user messages produce empty text and are dropped. A following assistant model is assigned to pending user turns. Titles are chosen from the history file when a meaningful `display` exists, otherwise from the first user message. Per-session state tracks the max event timestamp, output filename, and source mtime; growing sessions rewrite their existing archive. |
 | `codex.py` | Rollout JSONL under `~/.codex/sessions/` and `~/.codex/archived_sessions/`, plus `session_index.jsonl` for titles. | Keeps only `event_msg.user_message` and `event_msg.agent_message`. It drops developer instructions, reasoning, tool calls/results, token accounting, and world state. `session_meta` supplies id/cwd and `turn_context` supplies the current model, including delayed backfill when context follows a user event. Per-session state updates one stable Markdown file as an active rollout grows; unchanged source mtimes skip reparsing. |
 | `cursor.py` | A single SQLite database at `~/Library/Application Support/Cursor/User/globalStorage/state.vscdb`. | See the dedicated section below. Composer enumeration is derived from `bubbleId:` keys; `composerHeaders` supplies metadata. |
 | `antigravity.py` | JSONL transcripts under the Antigravity 2.0, IDE, and CLI brain roots. | One JSON object per line per "step". See the dedicated section below. Incremental state is isolated by surface and session, using source mtime/size fingerprints and stable output filenames. |
@@ -128,7 +128,7 @@ A single JSON state file (default `.export_state.json` next to the export root) 
 {
   "second_mind": {"last_export_count": 12},
   "opencode": {"last_session_time": 1719648000000},
-  "claude_code": {"last_timestamp": 1719648000000},
+  "claude_code": {"sessions": {"example-id": {"latest_timestamp": 1719648000000, "output_file": "20260629_example.md", "source_mtime_ns": 123}}},
   "antigravity": {
     "last_timestamp": 1719648000000,
     "legacy_cursor_migrated": true,
@@ -155,17 +155,19 @@ Each adapter carries its own cursor semantics because the sources expose time di
 
 - **Second Mind** has no per-conversation timestamp exposed reliably, so the cursor is a count of conversations already exported; on each run it exports only the conversations beyond that count.
 - **OpenCode** uses `session.time_created` (ms epoch) and re-queries rows with `time_created > last_session_time`.
-- **Claude Code** reduces each transcript to a single `latest_timestamp_ms` and compares it with a source-level cursor.
+- **Claude Code** compares each transcript's `latest_timestamp_ms` with its own `sessions[session_id].latest_timestamp`. An incremental run skips only when that timestamp has not advanced and the mapped output file exists. Successful writes record `latest_timestamp`, `output_file`, and `source_mtime_ns`; mtime does not bypass parsing. Existing output mappings are reused even if the title changes.
 - **Antigravity** keeps independent per-session state inside each product surface. Unchanged mtime/size fingerprints skip reparsing, changed sessions rewrite their prior output file, failed sessions remain retryable, and identical session ids on different surfaces do not collide in state.
 - **Codex** uses per-session state because active rollout files keep growing and archived sessions can move between directories. The adapter rewrites the same output file when a session changes and skips unchanged files by source mtime.
 - **Cursor** uses per-session state because composer bubbles grow in place and the composer id namespace does not fully overlap the header table. The adapter rewrites the same output file when a session's max timestamp advances and skips unchanged composers whose output already exists.
+
+Claude Code tolerates but ignores the legacy `last_timestamp` key. When a mapping is missing or its file no longer exists, a frontmatter identity index adopts an existing archive with matching `source: claude_code` and `session_id` before allocating a new name. The index is built lazily, at most once per call. Adoption prefers the canonical date/title filename when it belongs to that session, otherwise the lowest numeric suffix with a filename tie-breaker. Prior duplicates are left untouched; foreign or unreadable archives remain occupied. This backfills mappings without duplicating the archive on upgrade.
 
 The deprecated `antigravity.last_timestamp` is retained only as a one-time migration input for existing installations. Because the old adapter scanned only the IDE, that cursor is applied only to the `ide` surface. Migration completes only on an unfiltered run that scanned at least one IDE transcript without parse failures; 2.0 and CLI sessions are never suppressed by the legacy cursor.
 
 Two correctness properties are enforced uniformly:
 
-1. `--dry-run` runs the full scan and returns accurate counts but writes no files and does not persist state.
-2. `--full` ignores the cursor and re-exports everything, while still advancing the cursor forward (it never moves the cursor backward).
+1. `--dry-run` runs the full scan and returns accurate counts but writes no files and does not persist state. Claude Code also leaves the caller's state and output directory unchanged.
+2. `--full` bypasses freshness checks while retaining parser filters and `--since-date`. Claude Code still reuses or adopts output identity, so repeated full exports do not add files for the same session.
 
 `state.py` deep-copies `DEFAULT_STATE` on load and `setdefault`s per-source defaults on top of any persisted file, so a missing or partially-populated state file degrades gracefully to fresh cursors rather than crashing.
 

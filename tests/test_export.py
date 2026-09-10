@@ -181,7 +181,7 @@ def test_state_defaults() -> None:
     state = load_state(Path("/nonexistent/ai-session-export-state.json"))
     assert state["second_mind"] == {"last_export_count": 0}
     assert state["opencode"] == {"last_session_time": 0}
-    assert state["claude_code"] == {"last_timestamp": 0}
+    assert state["claude_code"] == {"sessions": {}}
     assert state["antigravity"] == {
         "last_timestamp": 0,
         "legacy_cursor_migrated": False,
@@ -664,6 +664,241 @@ def test_claude_code_export_with_fixture(tmp_path: Path) -> None:
         'turn_models: ["claude-opus-4-6", "claude-opus-4-6", "claude-sonnet-4-6", '
         '"claude-sonnet-4-6"]' in content
     )
+
+
+def test_claude_code_resume_rewrites_one_file(tmp_path: Path) -> None:
+    projects_root = tmp_path / "projects"
+    history_file = tmp_path / "history.jsonl"
+    _write_claude_session(projects_root, history_file)
+    session_file = projects_root / "-home-user-project" / "claude-fixture-1.jsonl"
+    events = session_file.read_text(encoding="utf-8").splitlines()
+    session_file.write_text("\n".join(events[:2]) + "\n", encoding="utf-8")
+    output_dir = tmp_path / "out"
+    state = {"claude_code": {"sessions": {"other-session": {"latest_timestamp": 9_999_999_999_999}}}}
+    kwargs = dict(full=False, dry_run=False, since_date=None,
+                  project_dirs=(projects_root,), history_files=(history_file,))
+
+    first = export_claude_code(output_dir, state, **kwargs)
+    assert first["exported"] == 1
+    files = list(output_dir.glob("*.md"))
+    assert len(files) == 1
+    assert "message_count: 2" in files[0].read_text(encoding="utf-8")
+
+    with session_file.open("a", encoding="utf-8") as handle:
+        handle.write("\n".join(events[-2:]) + "\n")
+    updated = export_claude_code(output_dir, state, **kwargs)
+    assert updated["exported"] == 1
+    assert list(output_dir.glob("*.md")) == files
+    content = files[0].read_text(encoding="utf-8")
+    assert "message_count: 4" in content
+    assert "Review the fixture code" in content
+    assert "The fixture looks good." in content
+    assert "Check one more fixture" in content
+    assert "The second fixture also looks good." in content
+    assert state["claude_code"]["sessions"]["claude-fixture-1"] == {
+        "latest_timestamp": updated["latest_seen"],
+        "output_file": files[0].name,
+        "source_mtime_ns": session_file.stat().st_mtime_ns,
+    }
+    mtime = files[0].stat().st_mtime_ns
+    unchanged = export_claude_code(output_dir, state, **kwargs)
+    assert unchanged["exported"] == 0
+    assert unchanged["scanned"] == 1
+    assert unchanged["latest_seen"] == updated["latest_seen"]
+    assert files[0].stat().st_mtime_ns == mtime
+
+
+@pytest.mark.parametrize("names, expected", [
+    (["20260629_Fixture_Claude_Task.md"], "20260629_Fixture_Claude_Task.md"),
+    (["20260629_Fixture_Claude_Task_2.md", "20260629_Fixture_Claude_Task.md"],
+     "20260629_Fixture_Claude_Task.md"),
+    (["20260629_Old_title_10.md", "20260629_Old_title_2.md"], "20260629_Old_title_2.md"),
+])
+@pytest.mark.parametrize("missing_mapping", [False, True])
+def test_claude_code_legacy_migration_adopts_archive(
+    tmp_path: Path, names: list[str], expected: str, missing_mapping: bool
+) -> None:
+    projects_root = tmp_path / "projects"
+    history_file = tmp_path / "history.jsonl"
+    _write_claude_session(projects_root, history_file)
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    old_record = SessionRecord(
+        source="claude_code", session_id="claude-fixture-1", title="Old title",
+        date="2026-06-29", messages=[MessageTurn(role="user", content="Old archive")],
+    )
+    old_content = render_markdown(old_record)
+    for name in names:
+        (output_dir / name).write_text(old_content, encoding="utf-8")
+    state_file = tmp_path / "state.json"
+    state_file.write_text(json.dumps({"claude_code": {"last_timestamp": 9_999_999_999_999}}), encoding="utf-8")
+    state = load_state(state_file)
+    assert state["claude_code"]["sessions"] == {}
+    if missing_mapping:
+        state["claude_code"]["sessions"]["claude-fixture-1"] = {
+            "latest_timestamp": 9_999_999_999_999, "output_file": "missing.md",
+        }
+    kwargs = dict(full=False, dry_run=False, since_date=None,
+                  project_dirs=(projects_root,), history_files=(history_file,))
+
+    result = export_claude_code(output_dir, state, **kwargs)
+    assert result["exported"] == 1
+    if missing_mapping:
+        expected = "missing.md"
+    assert sorted(path.name for path in output_dir.glob("*.md")) == sorted(
+        names + ([expected] if missing_mapping else [])
+    )
+    assert state["claude_code"]["sessions"]["claude-fixture-1"]["output_file"] == expected
+    assert "The second fixture also looks good." in (output_dir / expected).read_text(encoding="utf-8")
+    for name in names:
+        if name != expected:
+            assert (output_dir / name).read_text(encoding="utf-8") == old_content
+    assert state["claude_code"]["last_timestamp"] == 9_999_999_999_999
+    assert export_claude_code(output_dir, state, **kwargs)["exported"] == 0
+
+
+def test_claude_code_true_name_collision(tmp_path: Path) -> None:
+    projects_root = tmp_path / "projects"
+    history_file = tmp_path / "history.jsonl"
+    _write_claude_session(projects_root, history_file)
+    session_file = projects_root / "-home-user-project" / "claude-fixture-1.jsonl"
+    (session_file.parent / "claude-fixture-2.jsonl").write_text(
+        session_file.read_text(encoding="utf-8").replace("claude-fixture-1", "claude-fixture-2"),
+        encoding="utf-8",
+    )
+    with history_file.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps({"sessionId": "claude-fixture-2", "display": "Fixture Claude Task"}) + "\n")
+    output_dir = tmp_path / "out"
+    state = {}
+    kwargs = dict(full=False, dry_run=False, since_date=None,
+                  project_dirs=(projects_root,), history_files=(history_file,))
+
+    assert export_claude_code(output_dir, state, **kwargs)["exported"] == 2
+    expected = ["20260629_Fixture_Claude_Task.md", "20260629_Fixture_Claude_Task_2.md"]
+    assert sorted(path.name for path in output_dir.glob("*.md")) == expected
+    for session_id, previous in state["claude_code"]["sessions"].items():
+        assert f'session_id: "{session_id}"' in (output_dir / previous["output_file"]).read_text(encoding="utf-8")
+    assert export_claude_code(output_dir, {}, **kwargs)["exported"] == 2
+    assert sorted(path.name for path in output_dir.glob("*.md")) == expected
+
+
+def test_claude_code_missing_output_is_recreated(tmp_path: Path) -> None:
+    projects_root = tmp_path / "projects"
+    history_file = tmp_path / "history.jsonl"
+    _write_claude_session(projects_root, history_file)
+    output_dir = tmp_path / "out"
+    state = {}
+    kwargs = dict(full=False, dry_run=False, since_date=None,
+                  project_dirs=(projects_root,), history_files=(history_file,))
+    export_claude_code(output_dir, state, **kwargs)
+    output_file = next(output_dir.glob("*.md"))
+    content = output_file.read_text(encoding="utf-8")
+    output_file.unlink()
+
+    assert export_claude_code(output_dir, state, **kwargs)["exported"] == 1
+    assert list(output_dir.glob("*.md")) == [output_file]
+    assert output_file.read_text(encoding="utf-8") == content
+
+
+def test_claude_code_missing_output_preserves_recorded_filename_after_title_change(tmp_path: Path) -> None:
+    projects_root = tmp_path / "projects"
+    history_file = tmp_path / "history.jsonl"
+    _write_claude_session(projects_root, history_file)
+    output_dir = tmp_path / "out"
+    state = {}
+    kwargs = dict(full=False, dry_run=False, since_date=None,
+                  project_dirs=(projects_root,), history_files=(history_file,))
+
+    assert export_claude_code(output_dir, state, **kwargs)["exported"] == 1
+    original_name = "20260629_Fixture_Claude_Task.md"
+    assert state["claude_code"]["sessions"]["claude-fixture-1"]["output_file"] == original_name
+    output_file = output_dir / original_name
+    output_file.unlink()
+    history_file.write_text(
+        json.dumps({"sessionId": "claude-fixture-1", "display": "Renamed fixture task"}) + "\n",
+        encoding="utf-8",
+    )
+
+    assert export_claude_code(output_dir, state, **kwargs)["exported"] == 1
+    assert list(output_dir.glob("*.md")) == [output_file]
+    assert state["claude_code"]["sessions"]["claude-fixture-1"]["output_file"] == original_name
+    assert 'title: "Renamed fixture task"' in output_file.read_text(encoding="utf-8")
+
+
+def test_claude_code_full_preserves_identity_and_filters(tmp_path: Path) -> None:
+    projects_root = tmp_path / "projects"
+    history_file = tmp_path / "history.jsonl"
+    _write_claude_session(projects_root, history_file)
+    output_dir = tmp_path / "out"
+    state = {}
+    kwargs = dict(full=True, dry_run=False, project_dirs=(projects_root,), history_files=(history_file,))
+    assert export_claude_code(output_dir, state, since_date=None, **kwargs)["exported"] == 1
+    files = list(output_dir.glob("*.md"))
+    assert len(files) == 1
+    history_file.write_text(
+        json.dumps({"sessionId": "claude-fixture-1", "display": "Renamed fixture task"}) + "\n",
+        encoding="utf-8",
+    )
+    for next_state in (state, {}, state):
+        assert export_claude_code(output_dir, next_state, since_date=date(2026, 6, 29), **kwargs)["exported"] == 1
+        assert list(output_dir.glob("*.md")) == files
+        assert 'title: "Renamed fixture task"' in files[0].read_text(encoding="utf-8")
+    assert export_claude_code(output_dir, state, since_date=date(2026, 6, 30), **kwargs)["exported"] == 0
+
+    history_file.write_text(json.dumps({"sessionId": "claude-fixture-1", "display": "@explore subagent task"}) + "\n", encoding="utf-8")
+    assert export_claude_code(output_dir, state, since_date=None, **kwargs)["exported"] == 0
+    assert list(output_dir.glob("*.md")) == files
+
+
+@pytest.mark.parametrize("state", [{}, {"claude_code": {"last_timestamp": 9_999_999_999_999}},
+                                   {"claude_code": {"sessions": {}}}])
+@pytest.mark.parametrize("full", [False, True])
+def test_claude_code_dry_run_does_not_mutate_state_or_files(tmp_path: Path, state: dict, full: bool) -> None:
+    projects_root = tmp_path / "projects"
+    history_file = tmp_path / "history.jsonl"
+    _write_claude_session(projects_root, history_file)
+    original_state = json.loads(json.dumps(state))
+    output_dir = tmp_path / "out"
+    kwargs = dict(full=full, since_date=None, project_dirs=(projects_root,), history_files=(history_file,))
+
+    assert export_claude_code(output_dir, state, dry_run=True, **kwargs)["exported"] == 1
+    assert state == original_state
+    assert not output_dir.exists()
+
+    populated_state = {}
+    export_claude_code(output_dir, populated_state, dry_run=False, **kwargs)
+    output_file = next(output_dir.glob("*.md"))
+    mtime = output_file.stat().st_mtime_ns
+    assert export_claude_code(output_dir, state, dry_run=True, **kwargs)["exported"] == 1
+    assert state == original_state
+    previous = json.loads(json.dumps(populated_state))
+    assert export_claude_code(output_dir, populated_state, dry_run=True, **kwargs)["exported"] == int(full)
+    assert populated_state == previous
+    assert list(output_dir.glob("*.md")) == [output_file]
+    assert output_file.stat().st_mtime_ns == mtime
+
+
+@pytest.mark.parametrize("content", [
+    '---\nsource: codex\nsession_id: "claude-fixture-1"\n---\n',
+    '---\nsource: claude_code\nsession_id: "unterminated\n---\n',
+    '---\nsource: claude_code\nsession_id: "claude-fixture-1"\n',
+    'No frontmatter\n',
+])
+def test_claude_code_migration_preserves_foreign_or_unreadable_archives(tmp_path: Path, content: str) -> None:
+    projects_root = tmp_path / "projects"
+    history_file = tmp_path / "history.jsonl"
+    _write_claude_session(projects_root, history_file)
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    occupied = output_dir / "20260629_Fixture_Claude_Task.md"
+    occupied.write_text(content, encoding="utf-8")
+    result = export_claude_code(
+        output_dir, {}, full=False, dry_run=False, since_date=None,
+        project_dirs=(projects_root,), history_files=(history_file,),
+    )
+    assert result["exported"] == 1
+    assert occupied.read_text(encoding="utf-8") == content
+    assert (output_dir / "20260629_Fixture_Claude_Task_2.md").is_file()
 
 
 def test_claude_missing_assistant_model_does_not_leak_later_model(tmp_path: Path) -> None:
@@ -1657,7 +1892,7 @@ def test_cli_run_export_all_sources(tmp_path: Path) -> None:
     persisted = load_state(state_file)
     assert persisted["second_mind"]["last_export_count"] == 1
     assert persisted["opencode"]["last_session_time"] > 0
-    assert persisted["claude_code"]["last_timestamp"] > 0
+    assert persisted["claude_code"]["sessions"]["claude-fixture-1"]["latest_timestamp"] > 0
     antigravity_sessions = persisted["antigravity"]["surfaces"]["ide"]["sessions"]
     assert antigravity_sessions["antigravity-session-fixture"]["status"] == "complete"
     assert persisted["codex"]["sessions"]["codex-fixture-1"]["latest_timestamp"] > 0
