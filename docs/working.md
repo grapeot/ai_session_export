@@ -1,5 +1,9 @@
 ## Changelog
 
+### 2026-09-10
+
+- Fixed #7: Claude Code now tracks timestamps and output filenames per session, rewrites resumed sessions in place, and adopts existing archives by frontmatter identity when upgrading legacy state. Full exports preserve output identity and filters; dry-runs leave files and caller state untouched. Added synthetic regressions for growth, migration, prior duplicates, collisions, missing outputs, full exports, and dry-runs.
+
 ### 2026-09-08 (maintainer review round 2)
 
 - Stale-archive retirement is now provable-rewind-only: Gemini retires when the JSON snapshot's messages were emptied or the JSONL replay ends in a rewind with no surviving messages; Grok retires when a `rewind_marker` trail leaves no surviving prompt runs. Noise-title rewrites, subagent kinds, and other parser rejections no longer delete archives, and `--since-date` scopes retirement by session start time.
@@ -79,6 +83,8 @@
 - Added `docs/` with `prd.md`, `rfc.md`, `test.md`, and this file.
 
 ## Lessons Learned
+
+- **Stable output identity needs a migration path.** Replacing a global cursor with an empty per-session map alone duplicates existing archives on upgrade. Adopt files by frontmatter session identity before allocating a filename; dates and sanitized titles are not ownership keys.
 
 ### Key Learnings: Stateful CLI Integration
 

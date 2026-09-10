@@ -9,7 +9,7 @@ from typing import Any
 DEFAULT_STATE = {
     "second_mind": {"last_export_count": 0},
     "opencode": {"last_session_time": 0},
-    "claude_code": {"last_timestamp": 0},
+    "claude_code": {"sessions": {}},
     "codex": {"sessions": {}},
     "antigravity": {"last_timestamp": 0, "legacy_cursor_migrated": False, "surfaces": {}},
     "cursor": {"sessions": {}},
