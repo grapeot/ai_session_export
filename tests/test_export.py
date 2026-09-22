@@ -567,6 +567,73 @@ def _write_codex_session(session_dir: Path, index_file: Path, *, include_followu
     return session_file
 
 
+def _write_codex_item_completed_session(session_dir: Path, index_file: Path) -> Path:
+    """Rollout in the current Codex format, where turns arrive as item_completed events."""
+    session_dir.mkdir(parents=True, exist_ok=True)
+    index_file.write_text(
+        json.dumps(
+            {
+                "id": "codex-fixture-2",
+                "thread_name": "Fixture Item Completed Task",
+                "updated_at": "2026-06-30T09:05:00Z",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    events = [
+        {
+            "timestamp": "2026-06-30T09:00:00Z",
+            "type": "session_meta",
+            "payload": {"id": "codex-fixture-2", "cwd": "/home/user/project"},
+        },
+        {
+            "timestamp": "2026-06-30T09:00:01Z",
+            "type": "turn_context",
+            "payload": {"cwd": "/home/user/project", "model": "fixture-codex-model"},
+        },
+        {
+            "timestamp": "2026-06-30T09:00:02Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "item_completed",
+                "item": {
+                    "type": "UserMessage",
+                    "id": "item-1",
+                    "content": [{"type": "text", "text": "Review the fixture project"}],
+                },
+            },
+        },
+        {
+            "timestamp": "2026-06-30T09:00:03Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "item_completed",
+                "item": {
+                    "type": "Reasoning",
+                    "id": "item-2",
+                    "summary_text": ["private reasoning"],
+                    "raw_content": [],
+                },
+            },
+        },
+        {
+            "timestamp": "2026-06-30T09:00:04Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "item_completed",
+                "item": {
+                    "type": "AgentMessage",
+                    "id": "item-3",
+                    "content": [{"type": "Text", "text": "The fixture looks good."}],
+                },
+            },
+        },
+    ]
+    session_file = session_dir / "rollout-2026-06-30T09-00-00-codex-fixture-2.jsonl"
+    session_file.write_text("\n".join(json.dumps(event) for event in events) + "\n", encoding="utf-8")
+    return session_file
+
 # --------------------------------------------------------------------------- #
 # 2. Source adapter unit tests (tmp_path + synthetic fixtures)
 # --------------------------------------------------------------------------- #
@@ -1251,6 +1318,24 @@ def test_antigravity_dry_run_does_not_mutate_state(tmp_path: Path) -> None:
     assert state == original_state
     assert not (tmp_path / "output").exists()
 
+
+def test_codex_parses_item_completed_rollout_format(tmp_path: Path) -> None:
+    """Current Codex rollouts wrap turns in item_completed; older ones used user_message."""
+    session_dir = tmp_path / "sessions"
+    index_file = tmp_path / "session_index.jsonl"
+    session_file = _write_codex_item_completed_session(session_dir, index_file)
+
+    parsed = parse_codex_session_file(session_file, {"codex-fixture-2": "Fixture Item Completed Task"})
+
+    assert parsed is not None
+    assert [message.role for message in parsed.record.messages] == ["user", "assistant"]
+    assert parsed.record.messages[0].content == "Review the fixture project"
+    assert parsed.record.messages[1].content == "The fixture looks good."
+    assert all("private reasoning" not in message.content for message in parsed.record.messages)
+    assert [message.model for message in parsed.record.messages] == [
+        "fixture-codex-model",
+        "fixture-codex-model",
+    ]
 
 def test_codex_export_with_fixture_and_incremental_update(tmp_path: Path) -> None:
     session_dir = tmp_path / "sessions"
