@@ -17,6 +17,11 @@ SYSTEM_REMINDER_PATTERN = re.compile(r"<system-reminder>.*?</system-reminder>", 
 # Stable prefix of DSH's rendered context snapshot (renderContextSnapshot in
 # dsh-system-prompt); injected as a plain user message, without a reminder wrapper.
 RUNTIME_CONTEXT_PREFIX = "Current runtime context."
+# Canonical generation names from dsh-session-format: version 0 is untagged,
+# later generations are `session.vN.jsonl`, and either encoding may add `.zstd`.
+# `.v0`, leading zeros, and unsafe integers are not generations.
+_GENERATION_NAME = re.compile(r"^session(?:\.v([1-9][0-9]*))?\.jsonl(?:\.zstd)?$")
+_MAX_GENERATION_VERSION = 2**53 - 1
 
 
 class ParsedDshSession(NamedTuple):
@@ -24,18 +29,51 @@ class ParsedDshSession(NamedTuple):
     latest_timestamp_ms: int
 
 
+def _generation_version(filename: str) -> int | None:
+    match = _GENERATION_NAME.fullmatch(filename)
+    if match is None:
+        return None
+    raw_version = match.group(1)
+    if raw_version is None:
+        return 0
+    version = int(raw_version)
+    if version > _MAX_GENERATION_VERSION:
+        return None
+    return version
+
+
+def _generation_rank(path: Path) -> tuple[int, str]:
+    try:
+        mtime_ns = path.stat().st_mtime_ns
+    except OSError:
+        mtime_ns = -1
+    return (mtime_ns, path.name)
+
+
 def _iter_session_files(sessions_dir: Path) -> list[Path]:
-    """DSH materializes one directory per session under per-workspace roots.
+    """One current generation per session directory.
 
     Directory ids are not a single namespace: top-level sessions use
     `session-<uuid>` while subagent children may use a bare uuid, so discovery
-    must not filter on a name prefix. Both physical encodings are accepted:
-    `session.jsonl.zstd` (default checksummed Zstandard frames) and plain
-    `session.jsonl`.
+    must not filter on a name prefix. Version 0 keeps `session.jsonl`; later
+    immutable generations are `session.vN.jsonl`. Either may be plain JSONL or
+    checksummed Zstandard (`*.jsonl.zstd`). A format migration leaves the
+    predecessor on disk, so each directory contributes only its highest version.
+    Two encodings of that version resolve by latest mtime, then filename.
     """
     if not sessions_dir.is_dir():
         return []
-    return sorted(sessions_dir.glob("*/*/session.jsonl*"))
+    by_directory: dict[Path, list[Path]] = {}
+    for path in sessions_dir.glob("*/*/*"):
+        if not path.is_file() or _generation_version(path.name) is None:
+            continue
+        by_directory.setdefault(path.parent, []).append(path)
+    selected: list[Path] = []
+    for files in by_directory.values():
+        newest = max(version for path in files if (version := _generation_version(path.name)) is not None)
+        candidates = [path for path in files if _generation_version(path.name) == newest]
+        selected.append(max(candidates, key=_generation_rank))
+    return sorted(selected)
 
 
 def _read_session_text(file_path: Path) -> str:
@@ -72,6 +110,18 @@ def _extract_text_content(content: Any) -> str:
 def _strip_system_reminders(text: str) -> str:
     """Drop machine-injected workspace instructions; they are not user speech."""
     return SYSTEM_REMINDER_PATTERN.sub("", text).strip()
+
+
+def _is_human_user_message(data: dict[str, Any]) -> bool:
+    """V4 labels injected turns on `data.source`. Legacy V0 events omit it.
+
+    Rejecting a missing source would drop those older user messages, so only
+    an object source is filtered, and only `kind == "user"` is kept.
+    """
+    source = data.get("source")
+    if isinstance(source, dict):
+        return source.get("kind") == "user"
+    return True
 
 
 def _format_model(provider: str, model: str) -> str:
@@ -159,6 +209,8 @@ def parse_dsh_session_file(file_path: Path) -> ParsedDshSession | None:
             continue
 
         if event_type == "user/message":
+            if not _is_human_user_message(data):
+                continue
             text = _strip_system_reminders(_extract_text_content(data.get("content")))
             if not text or text.startswith(RUNTIME_CONTEXT_PREFIX):
                 continue
