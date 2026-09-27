@@ -50,7 +50,7 @@ def run_export(
     state = load_state(state_file)
     results: list[dict[str, Any]] = []
 
-    if source in {"second-mind", "all"}:
+    if source == "second-mind":
         results.append(
             export_second_mind(
                 base_dir / "second_mind",

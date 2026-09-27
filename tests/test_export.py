@@ -1957,8 +1957,9 @@ def test_cli_run_export_all_sources(tmp_path: Path) -> None:
         grok_sessions_dir=tmp_path / "absent-grok",
     )
 
+    # Second Mind is opt-in: seeding its JSON and passing the path must not
+    # pull it into the default "all" run.
     assert {r["source"] for r in results} == {
-        "second_mind",
         "opencode",
         "claude_code",
         "antigravity",
@@ -1969,13 +1970,13 @@ def test_cli_run_export_all_sources(tmp_path: Path) -> None:
         "grok",
     }
 
-    # Each source produced at least one markdown file under base_dir.
-    for sub in ("second_mind", "opencode", "claude_code", "antigravity", "codex", "cursor", "dsh"):
+    # Each default source produced at least one markdown file under base_dir.
+    for sub in ("opencode", "claude_code", "antigravity", "codex", "cursor", "dsh"):
         assert list((tmp_path / sub).glob("*.md")), f"no markdown emitted for {sub}"
 
     # State file was persisted with refreshed counters.
     persisted = load_state(state_file)
-    assert persisted["second_mind"]["last_export_count"] == 1
+    assert persisted["second_mind"]["last_export_count"] == 0
     assert persisted["opencode"]["last_session_time"] > 0
     assert persisted["claude_code"]["sessions"]["claude-fixture-1"]["latest_timestamp"] > 0
     antigravity_sessions = persisted["antigravity"]["surfaces"]["ide"]["sessions"]
@@ -1983,6 +1984,28 @@ def test_cli_run_export_all_sources(tmp_path: Path) -> None:
     assert persisted["codex"]["sessions"]["codex-fixture-1"]["latest_timestamp"] > 0
     assert persisted["cursor"]["sessions"]["a6f723dc-9c5b-4169-b03f-31abb1e6069b"]["latest_timestamp"] > 0
     assert persisted["dsh"]["sessions"][DSH_FIXTURE_SESSION_ID]["latest_timestamp"] > 0
+
+
+@pytest.mark.integration
+def test_cli_run_export_second_mind_opt_in(tmp_path: Path) -> None:
+    second_mind_json = tmp_path / "second_mind_export.json"
+    _write_second_mind_json(second_mind_json)
+
+    state_file = tmp_path / ".export_state.json"
+    results = run_export(
+        "second-mind",
+        full=True,
+        dry_run=False,
+        base_dir=tmp_path,
+        state_file=state_file,
+        second_mind_json=second_mind_json,
+    )
+
+    assert [r["source"] for r in results] == ["second_mind"]
+    assert results[0]["exported"] == 1
+    assert list((tmp_path / "second_mind").glob("*.md"))
+    persisted = load_state(state_file)
+    assert persisted["second_mind"]["last_export_count"] == 1
 
 
 def test_cli_main_reports_partial_antigravity_failure(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:

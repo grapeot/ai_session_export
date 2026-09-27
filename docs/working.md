@@ -1,5 +1,9 @@
 ## Changelog
 
+### 2026-09-26
+
+- Second Mind is now opt-in: the default `all` run no longer touches `second_mind_export.json`, so a missing export file no longer aborts every other source with `FileNotFoundError`. `--source second-mind` remains available and still fails fast when its JSON is missing. The "all" integration test now seeds the Second Mind fixture and asserts it stays out; a new integration test locks in the explicit opt-in path.
+
 ### 2026-09-10
 
 - Fixed #7: Claude Code now tracks timestamps and output filenames per session, rewrites resumed sessions in place, and adopts existing archives by frontmatter identity when upgrading legacy state. Full exports preserve output identity and filters; dry-runs leave files and caller state untouched. Added synthetic regressions for growth, migration, prior duplicates, collisions, missing outputs, full exports, and dry-runs.
