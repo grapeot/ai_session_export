@@ -112,7 +112,7 @@ Antigravity emits `surface` as `"2"`, `"ide"`, or `"cli"`.
 | Antigravity IDE | `~/.gemini/antigravity-ide/brain/*/.system_generated/logs/transcript_full.jsonl` | JSONL |
 | Antigravity CLI | `~/.gemini/antigravity-cli/brain/*/.system_generated/logs/transcript_full.jsonl` | JSONL |
 | Cursor | `~/Library/Application Support/Cursor/User/globalStorage/state.vscdb` | SQLite |
-| DeepSeek Harness | `~/.dsh/sessions/*/*/session.jsonl*` | Zstandard-compressed JSONL |
+| DeepSeek Harness | `~/.dsh/sessions/*/*/session[.vN].jsonl[.zstd]` | JSONL or Zstandard; select the newest generation per session directory (currently V4) |
 | Gemini CLI | `~/.gemini/tmp/*/chats/session-*.json` or `.jsonl` | JSON / JSONL |
 | Grok Build | `~/.grok/sessions/*/*/updates.jsonl` + `summary.json` | JSONL + JSON |
 | Second Mind | `./second_mind_export.json` | JSON |

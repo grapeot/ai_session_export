@@ -13,7 +13,7 @@ Export AI coding session transcripts from multiple tools into a unified Markdown
 | Google Antigravity IDE | `~/.gemini/antigravity-ide/brain/*/.system_generated/logs/transcript_full.jsonl` |
 | Google Antigravity CLI | `~/.gemini/antigravity-cli/brain/*/.system_generated/logs/transcript_full.jsonl` |
 | Cursor | `~/Library/Application Support/Cursor/User/globalStorage/state.vscdb` |
-| DeepSeek Harness | `~/.dsh/sessions/*/*/session.jsonl*` |
+| DeepSeek Harness | `~/.dsh/sessions/*/*/session[.vN].jsonl[.zstd]` |
 | Gemini CLI | `~/.gemini/tmp/*/chats/session-*.json` or `.jsonl` |
 | Grok Build | `~/.grok/sessions/*/*/updates.jsonl` and `summary.json` |
 | Second Mind | `second_mind_export.json` |
@@ -60,13 +60,20 @@ the `antigravity/` output directory and `source: antigravity`, while optional
 frontmatter `surface` identifies `"2"`, `"ide"`, or `"cli"`. The legacy
 `--antigravity-dir /path/to/brain` override scans one IDE-compatible root.
 
-The DeepSeek Harness source reads each session's append-only event log
-(`session.jsonl.zstd`, or plain `session.jsonl` when compression is disabled;
-session directory ids are not a single namespace, so discovery accepts any id
-shape). It keeps `user/message` and `assistant/message` events (final assembled
-turns, not streaming chunks), takes titles from `session/title` events, and
-attributes models per message from `assistant/message` `source` (falling back
-to `request/header`), back-filling the user turns that triggered each response.
+The DeepSeek Harness source reads the newest immutable generation in each
+session directory (`session.jsonl` for version 0, `session.vN.jsonl` for later
+generations; either may be plain JSONL or `*.zstd`). Older generations stay on
+disk after a format migration and are not exported. Two encodings of the same
+version resolve by latest mtime. Session directory ids are not a single
+namespace, so discovery accepts any id shape. It keeps assembled
+`assistant/message` events and human `user/message` events (not streaming
+chunks). When `data.source` is an object, only `source.kind` of `user` is
+kept; legacy events that omit `source` are still exported. Other kinds,
+including `agent-instructions`, `runtime-context`, `user-approval`, and
+`model-selection`, are dropped even when their text is nonempty. Titles come
+from `session/title` events, and models are attributed per message from
+`assistant/message` `source` (falling back to `request/header`), back-filling
+the user turns that triggered each response.
 It drops subagent-child sessions and `<system-reminder>` instruction
 injections, tolerates torn trailing records (including a truncated final
 Zstandard frame), and rewrites one stable file per growing live session.

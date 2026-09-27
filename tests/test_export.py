@@ -32,7 +32,12 @@ from ai_session_export.sources.codex import (
     parse_codex_session_file,
 )
 from ai_session_export.sources.cursor import DEFAULT_CURSOR_DB, export_cursor
-from ai_session_export.sources.dsh import DEFAULT_DSH_SESSIONS_DIR, export_dsh, parse_dsh_session_file
+from ai_session_export.sources.dsh import (
+    DEFAULT_DSH_SESSIONS_DIR,
+    _iter_session_files,
+    export_dsh,
+    parse_dsh_session_file,
+)
 from ai_session_export.sources.opencode import export_opencode
 from ai_session_export.sources.second_mind import export_second_mind
 from ai_session_export.state import DEFAULT_STATE, load_state, save_state
@@ -1905,6 +1910,331 @@ def test_dsh_unreadable_session_is_isolated(tmp_path: Path) -> None:
     assert result["failed"] == 1
     assert "RuntimeError" in result["warnings"][0]["error"]
     assert len(list((tmp_path / "dsh").glob("*.md"))) == 1
+
+
+def _write_named_dsh_log(session_dir: Path, filename: str, text: str, *, version: int) -> Path:
+    session_dir.mkdir(parents=True, exist_ok=True)
+    events = [
+        {
+            "type": "session",
+            "version": version,
+            "id": session_dir.name,
+            "createdAt": DSH_FIXTURE_CREATED_AT,
+            "cwd": "/home/user/project",
+        },
+        {
+            "type": "user/message",
+            "seq": 1,
+            "time": DSH_FIXTURE_CREATED_AT + 100,
+            "surfaceOp": "append",
+            "data": {
+                "content": [{"type": "text", "text": text}],
+                "role": "user",
+                "source": {"kind": "user"},
+            },
+        },
+        {
+            "type": "assistant/message",
+            "seq": 2,
+            "time": DSH_FIXTURE_CREATED_AT + 200,
+            "data": {
+                "message": {
+                    "content": [
+                        {"type": "reasoning", "text": "hidden reasoning"},
+                        {"type": "text", "text": f"{text} reply"},
+                    ],
+                    "role": "assistant",
+                    "source": {
+                        "kind": "model",
+                        "provider": "fixture-provider",
+                        "model": "fixture-model",
+                        "replayState": {},
+                    },
+                },
+                "step": 1,
+                "turn": 1,
+                "stream": [{"type": "text-chunks"}],
+            },
+        },
+    ]
+    payload = ("\n".join(json.dumps(event) for event in events) + "\n").encode()
+    path = session_dir / filename
+    if filename.endswith(".zstd"):
+        path.write_bytes(
+            subprocess.run(["zstd", "-c", "-"], input=payload, capture_output=True, check=True).stdout
+        )
+    else:
+        path.write_bytes(payload)
+    return path
+
+
+def _set_mtime_ns(path: Path, mtime_ns: int) -> None:
+    os.utime(path, ns=(mtime_ns, mtime_ns))
+
+
+def test_dsh_legacy_and_v4_sessions_both_export(tmp_path: Path) -> None:
+    sessions_dir = tmp_path / "sessions"
+    legacy_dir = sessions_dir / "--home-user-project--" / "session-legacy0000-1111-4222-8333-444455556666"
+    current_dir = sessions_dir / "--home-user-project--" / "session-current000-1111-4222-8333-444455556666"
+    _write_named_dsh_log(legacy_dir, "session.jsonl", "legacy generation fixture", version=0)
+    _write_named_dsh_log(current_dir, "session.v4.jsonl", "current v4 fixture", version=4)
+
+    state = {"dsh": {"sessions": {}}}
+    result = export_dsh(
+        tmp_path / "dsh", state, full=False, dry_run=False, since_date=None, sessions_dir=sessions_dir
+    )
+    assert result["scanned"] == 2
+    assert result["exported"] == 2
+    archived = "\n".join(path.read_text(encoding="utf-8") for path in (tmp_path / "dsh").glob("*.md"))
+    assert "legacy generation fixture reply" in archived
+    assert "current v4 fixture reply" in archived
+    assert "hidden reasoning" not in archived
+    assert 'models_used: ["fixture-provider/fixture-model"]' in archived
+
+
+def test_dsh_mixed_generations_export_newest_only(tmp_path: Path) -> None:
+    sessions_dir = tmp_path / "sessions"
+    session_dir = sessions_dir / "--home-user-project--" / "session-mixed00000-1111-4222-8333-444455556666"
+    stale = _write_named_dsh_log(session_dir, "session.jsonl", "stale predecessor fixture", version=0)
+    middle = _write_named_dsh_log(session_dir, "session.v3.jsonl", "middle generation fixture", version=3)
+    current = _write_named_dsh_log(session_dir, "session.v4.jsonl", "current generation fixture", version=4)
+    (session_dir / "session.lock").write_text("lock", encoding="utf-8")
+    (session_dir / "session.v0.jsonl").write_text("not a generation", encoding="utf-8")
+    (session_dir / "session.v01.jsonl").write_text("not a generation", encoding="utf-8")
+    (session_dir / "session.v4.jsonl.bak").write_text("not a generation", encoding="utf-8")
+    _set_mtime_ns(stale, 30_000)
+    _set_mtime_ns(middle, 20_000)
+    _set_mtime_ns(current, 10_000)
+
+    selected = _iter_session_files(sessions_dir)
+    assert [path.name for path in selected] == ["session.v4.jsonl"]
+
+    state = {"dsh": {"sessions": {}}}
+    result = export_dsh(
+        tmp_path / "dsh", state, full=False, dry_run=False, since_date=None, sessions_dir=sessions_dir
+    )
+    assert result["scanned"] == 1
+    assert result["exported"] == 1
+    content = next((tmp_path / "dsh").glob("*.md")).read_text(encoding="utf-8")
+    assert "current generation fixture reply" in content
+    assert "stale predecessor fixture" not in content
+    assert "middle generation fixture" not in content
+
+
+def test_dsh_same_version_prefers_latest_mtime(tmp_path: Path) -> None:
+    sessions_dir = tmp_path / "sessions"
+    session_dir = sessions_dir / "--home-user-project--" / "session-mtime00000-1111-4222-8333-444455556666"
+    plain = session_dir / "session.v4.jsonl"
+    compressed_name = session_dir / "session.v4.jsonl.zstd"
+    session_dir.mkdir(parents=True)
+    plain.write_text("plain", encoding="utf-8")
+    compressed_name.write_bytes(b"compressed-name")
+    _set_mtime_ns(plain, 1_000)
+    _set_mtime_ns(compressed_name, 2_000)
+
+    selected = _iter_session_files(sessions_dir)
+    assert [path.name for path in selected] == ["session.v4.jsonl.zstd"]
+
+    _set_mtime_ns(plain, 3_000)
+    selected = _iter_session_files(sessions_dir)
+    assert [path.name for path in selected] == ["session.v4.jsonl"]
+
+
+@pytest.mark.skipif(shutil.which("zstd") is None, reason="zstd binary not available")
+def test_dsh_compressed_v4_reexport_is_idempotent(tmp_path: Path) -> None:
+    sessions_dir = tmp_path / "sessions"
+    session_dir = sessions_dir / "--home-user-project--" / "session-v4compressed-1111-4222-8333-444455556666"
+    source = _write_named_dsh_log(session_dir, "session.v4.jsonl.zstd", "compressed v4 fixture", version=4)
+    output_dir = tmp_path / "dsh"
+    state = {"dsh": {"sessions": {}}}
+
+    first = export_dsh(
+        output_dir, state, full=False, dry_run=False, since_date=None, sessions_dir=sessions_dir
+    )
+    assert first == {"source": "dsh", "scanned": 1, "exported": 1}
+    archived = list(output_dir.glob("*.md"))
+    assert len(archived) == 1
+    content = archived[0].read_text(encoding="utf-8")
+    assert "compressed v4 fixture reply" in content
+    assert "hidden reasoning" not in content
+    assert state["dsh"]["sessions"][session_dir.name]["source_mtime_ns"] == source.stat().st_mtime_ns
+
+    second = export_dsh(
+        output_dir, state, full=False, dry_run=False, since_date=None, sessions_dir=sessions_dir
+    )
+    assert second == {"source": "dsh", "scanned": 1, "exported": 0}
+    assert list(output_dir.glob("*.md")) == archived
+    assert archived[0].read_text(encoding="utf-8") == content
+
+
+def test_dsh_v4_mixed_source_kinds_keep_human_turns_only(tmp_path: Path) -> None:
+    """Injected V4 user/message kinds are not dialogue. Missing source stays."""
+    session_id = "session-v4kinds000-1111-4222-8333-444455556666"
+    human = "Human fixture prompt about the parser"
+    follow_up = "Human follow-up after the model switch"
+    legacy = "Legacy fixture prompt without a source field"
+    dropped = (
+        "Fixture agent instructions must not become a user turn.",
+        "Fixture runtime snapshot without the legacy prefix.",
+        "Fixture approval is not a human prompt.",
+        "Fixture model selection is not a human prompt.",
+        "Fixture empty source dict is not legacy.",
+        "Second fixture instruction block after the reply.",
+    )
+    events: list[dict[str, object]] = [
+        {
+            "type": "session",
+            "version": 4,
+            "id": session_id,
+            "createdAt": DSH_FIXTURE_CREATED_AT,
+            "cwd": "/home/user/project",
+        },
+        {
+            "type": "user/message",
+            "seq": 1,
+            "time": DSH_FIXTURE_CREATED_AT + 100,
+            "data": {
+                "content": [{"type": "text", "text": dropped[0]}],
+                "role": "user",
+                "source": {"kind": "agent-instructions"},
+            },
+        },
+        {
+            "type": "user/message",
+            "seq": 2,
+            "time": DSH_FIXTURE_CREATED_AT + 101,
+            "data": {
+                "content": [{"type": "text", "text": dropped[1]}],
+                "role": "user",
+                "source": {"kind": "runtime-context"},
+            },
+        },
+        {
+            "type": "user/message",
+            "seq": 3,
+            "time": DSH_FIXTURE_CREATED_AT + 200,
+            "data": {
+                "content": [{"type": "text", "text": human}],
+                "role": "user",
+                "source": {"kind": "user", "id": "fixture-user-1"},
+            },
+        },
+        {
+            "type": "assistant/message",
+            "seq": 4,
+            "time": DSH_FIXTURE_CREATED_AT + 300,
+            "data": {
+                "message": {
+                    "content": [{"type": "text", "text": "First fixture reply."}],
+                    "role": "assistant",
+                    "source": {"kind": "model", "provider": "fixture-provider", "model": "fixture-model-a"},
+                }
+            },
+        },
+        {
+            "type": "user/message",
+            "seq": 5,
+            "time": DSH_FIXTURE_CREATED_AT + 400,
+            "data": {
+                "content": [{"type": "text", "text": dropped[2]}],
+                "role": "user",
+                "source": {"kind": "user-approval"},
+            },
+        },
+        {
+            "type": "user/message",
+            "seq": 6,
+            "time": DSH_FIXTURE_CREATED_AT + 401,
+            "data": {
+                "content": [{"type": "text", "text": dropped[3]}],
+                "role": "user",
+                "source": {"kind": "model-selection"},
+            },
+        },
+        {
+            "type": "user/message",
+            "seq": 7,
+            "time": DSH_FIXTURE_CREATED_AT + 402,
+            "data": {
+                "content": [{"type": "text", "text": dropped[4]}],
+                "role": "user",
+                "source": {},
+            },
+        },
+        {
+            "type": "user/message",
+            "seq": 8,
+            "time": DSH_FIXTURE_CREATED_AT + 500,
+            "data": {"content": [{"type": "text", "text": legacy}], "role": "user"},
+        },
+        {
+            "type": "user/message",
+            "seq": 9,
+            "time": DSH_FIXTURE_CREATED_AT + 600,
+            "data": {
+                "content": [{"type": "text", "text": follow_up}],
+                "role": "user",
+                "source": {"kind": "user"},
+            },
+        },
+        {
+            "type": "assistant/message",
+            "seq": 10,
+            "time": DSH_FIXTURE_CREATED_AT + 700,
+            "data": {
+                "message": {
+                    "content": [{"type": "text", "text": "Second fixture reply."}],
+                    "role": "assistant",
+                    "source": {"kind": "model", "provider": "fixture-provider", "model": "fixture-model-b"},
+                }
+            },
+        },
+        {
+            "type": "user/message",
+            "seq": 11,
+            "time": DSH_FIXTURE_CREATED_AT + 800,
+            "data": {
+                "content": [{"type": "text", "text": dropped[5]}],
+                "role": "user",
+                "source": {"kind": "agent-instructions"},
+            },
+        },
+    ]
+    session_dir = tmp_path / "sessions" / "--home-user-project--" / session_id
+    session_dir.mkdir(parents=True)
+    (session_dir / "session.v4.jsonl").write_text(
+        "\n".join(json.dumps(event) for event in events) + "\n",
+        encoding="utf-8",
+    )
+
+    parsed = parse_dsh_session_file(session_dir / "session.v4.jsonl")
+    assert parsed is not None
+    assert parsed.record.title == human
+    assert [(message.role, message.content) for message in parsed.record.messages] == [
+        ("user", human),
+        ("assistant", "First fixture reply."),
+        ("user", legacy),
+        ("user", follow_up),
+        ("assistant", "Second fixture reply."),
+    ]
+    assert len(parsed.record.messages) == 5
+    assert [message.model for message in parsed.record.messages] == [
+        "fixture-provider/fixture-model-a",
+        "fixture-provider/fixture-model-a",
+        "fixture-provider/fixture-model-b",
+        "fixture-provider/fixture-model-b",
+        "fixture-provider/fixture-model-b",
+    ]
+    rendered = render_markdown(parsed.record)
+    assert rendered.count("## User") == 3
+    assert rendered.count("## Assistant") == 2
+    assert (
+        'turn_models: ["fixture-provider/fixture-model-a", "fixture-provider/fixture-model-a", '
+        '"fixture-provider/fixture-model-b", "fixture-provider/fixture-model-b", '
+        '"fixture-provider/fixture-model-b"]'
+    ) in rendered
+    for text in dropped:
+        assert text not in rendered
 
 
 # --------------------------------------------------------------------------- #
