@@ -30,11 +30,13 @@ archive for browsing, semantic search, and downstream workflows.
 All commands run from the project root.
 
 ```bash
-# Export all sources (incremental — only new sessions since last run)
+# Export all default sources (incremental — only new sessions since last run)
+# Second Mind is opt-in and not part of "all".
 python export_sessions.py
 
 # Export a specific source
 python export_sessions.py --source antigravity
+python export_sessions.py --source second-mind
 python export_sessions.py --source codex
 python export_sessions.py --source cursor
 python export_sessions.py --source dsh
@@ -114,6 +116,9 @@ Antigravity emits `surface` as `"2"`, `"ide"`, or `"cli"`.
 | Gemini CLI | `~/.gemini/tmp/*/chats/session-*.json` or `.jsonl` | JSON / JSONL |
 | Grok Build | `~/.grok/sessions/*/*/updates.jsonl` + `summary.json` | JSONL + JSON |
 | Second Mind | `./second_mind_export.json` | JSON |
+
+Second Mind is opt-in: it is excluded from the default `all` run and only
+exports with an explicit `--source second-mind`.
 
 ## Adding a New Source
 

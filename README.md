@@ -18,17 +18,22 @@ Export AI coding session transcripts from multiple tools into a unified Markdown
 | Grok Build | `~/.grok/sessions/*/*/updates.jsonl` and `summary.json` |
 | Second Mind | `second_mind_export.json` |
 
+Second Mind is opt-in: it is excluded from the default `all` run and only
+exports with an explicit `--source second-mind`.
+
 ## Quick Start
 
 ```bash
 # Install
 uv pip install -e '.[dev]'
 
-# Export all sources (incremental)
+# Export all default sources (incremental)
+# Second Mind is opt-in and not part of "all".
 python export_sessions.py
 
 # Export specific source
 python export_sessions.py --source antigravity
+python export_sessions.py --source second-mind
 python export_sessions.py --source codex
 python export_sessions.py --source cursor
 python export_sessions.py --source dsh
