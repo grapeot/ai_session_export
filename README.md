@@ -79,6 +79,49 @@ injections, tolerates torn trailing records (including a truncated final
 Zstandard frame), and rewrites one stable file per growing live session.
 Decompression shells out to the `zstd` binary.
 
+## Recovering a truncated Claude Code Remote session
+
+Claude Code sessions driven through Claude Code Remote or Remote Control can
+have their local transcript rewritten so it starts at a later compaction
+boundary; the earlier part survives only in the cloud transcript. The Claude
+Code adapter detects three signals: the first record's `parentUuid` points
+outside the file (`parent_uuid_missing`), the first user message is a
+compaction summary (`starts_with_continuation_summary`), or the session's
+`subagents/*.jsonl` files start earlier than the main transcript
+(`subagent_activity_before_transcript`). Affected archives gain
+`transcript_truncated: true`, `truncation_signals`, and, when known,
+`earliest_known_activity`. The CLI prints one warning per affected session to
+stderr.
+
+To recover, an agent with the Claude Code Remote MCP tools finds the cloud
+session id (`get_session` with no id describes the current session; otherwise
+`list_sessions`). It then pages backwards with
+`list_events(session_id=<cloud id>, before_id=<earliest local uuid>, kinds=["user"], limit=100)`,
+continuing with `before_id=<first_id of the previous page>`. Pages are large,
+cover only about 10-15 minutes of an active session, and are filtered after
+being read, so parse them with a script. `kinds=["user"]` still includes tool
+results: keep only human-typed text (string content or `type == "text"`
+blocks) and drop tool results, image placeholders, task notifications, system
+reminders, subagent hand-backs, skill bodies, and compaction summaries.
+Write the recovered messages, one JSON object per line, to
+`<backfill-dir>/<local_session_id>.jsonl`:
+
+```json
+{"created_at": "2026-06-27T08:30:00Z", "role": "user", "text": "..."}
+```
+
+The backfill dir defaults to `<base-dir>/claude_code_backfill/` and can be
+overridden with `--claude-backfill-dir`. Re-run
+`python export_sessions.py --source claude-code --full`. Messages earlier than
+the first local message are sorted, de-duplicated, and prepended; overlapping
+ones are ignored. `date` moves to the earliest message and
+`backfilled_messages: N` is added. Incremental runs re-export a session when
+its backfill file changes. See `skill.md` for the step-by-step procedure.
+
+Note that `--since-date` combined with `--full` re-writes matching archives from
+the transcript content currently on disk, so recover truncated sessions before
+running it.
+
 ## Gemini CLI
 
 Export sessions created by the Gemini CLI (`google-gemini/gemini-cli`).
@@ -139,7 +182,9 @@ one-to-one with the rendered `User` and `Assistant` sections. Unknown entries ar
 `null`; the field is omitted when every turn is unknown. `models_used` remains a
 session-level inventory and must not be used to guess per-turn attribution.
 Antigravity records additionally include `surface: "2"`, `surface: "ide"`, or
-`surface: "cli"`.
+`surface: "cli"`. Claude Code records may include the optional
+`transcript_truncated`, `truncation_signals`, `earliest_known_activity`, and
+`backfilled_messages` keys described above; they are omitted otherwise.
 
 ## Installation as a Coding Agent Skill
 

@@ -33,6 +33,9 @@ class SessionRecord(NamedTuple):
     project_directory: str = ""
     models_used: list[str] = []
     surface: str = ""      # optional product surface, currently Antigravity only
+    truncation_signals: list[str] = []  # Claude Code only; empty when the transcript looks complete
+    earliest_known_activity: str = ""   # Claude Code only; ISO timestamp from subagent transcripts
+    backfilled_messages: int = 0        # Claude Code only; turns merged from a cloud backfill file
 ```
 
 `NamedTuple` is chosen over `dataclass` for its immutability and trivial serialisability — a parsed session is a value object that should never be mutated between parsing and rendering. Adapters may replace an immutable turn while resolving delayed attribution, such as Claude's next assistant response or Codex's following turn context. Adapters are free to carry private intermediate types (for example `ParsedAntigravitySession` and `ParsedClaudeSession`) that bundle a `SessionRecord` together with a source-specific cursor field, but those intermediate types never cross into the renderer.
@@ -41,7 +44,7 @@ class SessionRecord(NamedTuple):
 
 `markdown.py::render_markdown(session: SessionRecord) -> str` is the single function that turns a `SessionRecord` into the final file bytes. Every adapter calls it; none writes Markdown directly. This guarantees the Markdown Output Contract (see `prd.md`) is enforced in exactly one place.
 
-The renderer is a straight-line builder: it assembles the frontmatter lines (conditionally adding `surface`, `project_directory`, `models_used`, and `turn_models`), then iterates `messages` emitting `## User` / `## Assistant` headers with an optional `[HH:MM]` suffix derived from `time_created` via `utils.ms_to_hhmm`. `surface` is currently emitted only for Antigravity and distinguishes `"2"`, `"ide"`, and `"cli"` without changing the stable top-level `source: antigravity`. `turn_models` is a JSON array aligned one-to-one with those sections; unknown entries are `null`, and the field is omitted when every turn is unknown. These optional fields extend the contract without changing headings or message bodies, so older consumers can ignore them safely. All string frontmatter values pass through `utils.yaml_string`, which JSON-quotes them so YAML-special characters cannot break the block.
+The renderer is a straight-line builder: it assembles the frontmatter lines (conditionally adding `surface`, `project_directory`, `models_used`, and `turn_models`), then iterates `messages` emitting `## User` / `## Assistant` headers with an optional `[HH:MM]` suffix derived from `time_created` via `utils.ms_to_hhmm`. `surface` is currently emitted only for Antigravity and distinguishes `"2"`, `"ide"`, and `"cli"` without changing the stable top-level `source: antigravity`. `turn_models` is a JSON array aligned one-to-one with those sections; unknown entries are `null`, and the field is omitted when every turn is unknown. When `truncation_signals` is non-empty the renderer adds `transcript_truncated: true` and the signal list; `earliest_known_activity` and `backfilled_messages` are emitted only when set. These optional fields extend the contract without changing headings or message bodies, so older consumers can ignore them safely. All string frontmatter values pass through `utils.yaml_string`, which JSON-quotes them so YAML-special characters cannot break the block.
 
 ## Source Adapters
 
@@ -55,6 +58,20 @@ Each adapter follows the same contract: a function `export_<name>(output_dir, st
 | `codex.py` | Rollout JSONL under `~/.codex/sessions/` and `~/.codex/archived_sessions/`, plus `session_index.jsonl` for titles. | Keeps only `event_msg.user_message` and `event_msg.agent_message`. It drops developer instructions, reasoning, tool calls/results, token accounting, and world state. `session_meta` supplies id/cwd and `turn_context` supplies the current model, including delayed backfill when context follows a user event. Per-session state updates one stable Markdown file as an active rollout grows; unchanged source mtimes skip reparsing. |
 | `cursor.py` | A single SQLite database at `~/Library/Application Support/Cursor/User/globalStorage/state.vscdb`. | See the dedicated section below. Composer enumeration is derived from `bubbleId:` keys; `composerHeaders` supplies metadata. |
 | `antigravity.py` | JSONL transcripts under the Antigravity 2.0, IDE, and CLI brain roots. | One JSON object per line per "step". See the dedicated section below. Incremental state is isolated by surface and session, using source mtime/size fingerprints and stable output filenames. |
+
+## Claude Code Truncation and Backfill
+
+Claude Code sessions driven through Claude Code Remote / Remote Control can have their local transcript rewritten so it begins at a later compaction boundary. The adapter checks three signals while parsing, all local and cheap:
+
+| Signal | Check |
+|---|---|
+| `parent_uuid_missing` | The first record carrying a `uuid` has a non-null `parentUuid` that no record in the file carries. |
+| `starts_with_continuation_summary` | The first exported user message starts with "This session is being continued from a previous conversation". |
+| `subagent_activity_before_transcript` | The earliest timestamp in `<project>/<session_id>/subagents/*.jsonl` precedes the main transcript's earliest timestamp. Only each file's prefix up to its first timestamped record is read. The earliest value is exported as `earliest_known_activity`. |
+
+Any signal marks the record and adds a per-session warning (`session_id` plus a message naming the first local timestamp, the signals, and the `skill.md` recovery section) to the adapter's `warnings`. The CLI prints it to stderr without counting a failure.
+
+Backfill files live in `--claude-backfill-dir` (default `<base-dir>/claude_code_backfill/`) as `<local_session_id>.jsonl`, one `{"created_at", "role", "text"}` object per line. Invalid lines are skipped with a warning. Recovered turns strictly earlier than the first local message are sorted, de-duplicated by `(time, role, text)`, and prepended; overlapping turns are dropped because the local transcript is authoritative for its own range. `date` moves to the earliest merged turn (UTC), and when no history title exists, the first recovered user message replaces the compaction summary as the fallback title. Existing output identity is unchanged, so a backfilled session rewrites its current archive file.
 
 ## Cursor Adapter Design
 
@@ -155,7 +172,7 @@ Each adapter carries its own cursor semantics because the sources expose time di
 
 - **Second Mind** has no per-conversation timestamp exposed reliably, so the cursor is a count of conversations already exported; on each run it exports only the conversations beyond that count.
 - **OpenCode** uses `session.time_created` (ms epoch) and re-queries rows with `time_created > last_session_time`.
-- **Claude Code** compares each transcript's `latest_timestamp_ms` with its own `sessions[session_id].latest_timestamp`. An incremental run skips only when that timestamp has not advanced and the mapped output file exists. Successful writes record `latest_timestamp`, `output_file`, and `source_mtime_ns`; mtime does not bypass parsing. Existing output mappings are reused even if the title changes.
+- **Claude Code** compares each transcript's `latest_timestamp_ms` with its own `sessions[session_id].latest_timestamp`. An incremental run skips only when that timestamp has not advanced, the mapped output file exists, and the backfill file's mtime equals the recorded `backfill_mtime_ns` (the key is present only when a backfill file existed at the last write). Successful writes record `latest_timestamp`, `output_file`, and `source_mtime_ns`; mtime does not bypass parsing. Existing output mappings are reused even if the title changes.
 - **Antigravity** keeps independent per-session state inside each product surface. Unchanged mtime/size fingerprints skip reparsing, changed sessions rewrite their prior output file, failed sessions remain retryable, and identical session ids on different surfaces do not collide in state.
 - **Codex** uses per-session state because active rollout files keep growing and archived sessions can move between directories. The adapter rewrites the same output file when a session changes and skips unchanged files by source mtime.
 - **Cursor** uses per-session state because composer bubbles grow in place and the composer id namespace does not fully overlap the header table. The adapter rewrites the same output file when a session's max timestamp advances and skips unchanged composers whose output already exists.
@@ -185,6 +202,7 @@ Flags:
 | `--since-date YYYY-MM-DD` | Drop sessions whose date is before the given day. |
 | `--base-dir` | Override the export root (default: `~/.local/share/ai-session-export`). |
 | `--state-file` | Override the state cursor file. |
+| `--claude-backfill-dir` | Directory of recovered Claude Code cloud messages (default `<base-dir>/claude_code_backfill/`). |
 | `--second-mind-json`, `--opencode-db`, `--antigravity-dir`, `--codex-dir`, `--codex-session-index`, `--cursor-db` | Override each source's input location. `--antigravity-dir` preserves the original single-root interface and treats that root as an IDE-compatible surface; omitting it scans all three defaults. |
 
 After each adapter runs, `main()` prints one summary line per source (`exported=N scanned=N`, or `exported=N total=N` for Second Mind). Antigravity adds `failed=N` when any session could not be parsed, then exits non-zero after persisting successful work so cron can distinguish partial success from a clean run.
