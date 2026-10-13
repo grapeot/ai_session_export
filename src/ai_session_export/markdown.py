@@ -28,6 +28,13 @@ def render_markdown(session: SessionRecord) -> str:
     turn_models = [message.model for message in session.messages]
     if any(turn_models):
         lines.append(f"turn_models: {json.dumps(turn_models, ensure_ascii=False)}")
+    if session.truncation_signals:
+        lines.append("transcript_truncated: true")
+        lines.append(f"truncation_signals: {json.dumps(session.truncation_signals, ensure_ascii=False)}")
+    if session.earliest_known_activity:
+        lines.append(f"earliest_known_activity: {yaml_string(session.earliest_known_activity)}")
+    if session.backfilled_messages:
+        lines.append(f"backfilled_messages: {session.backfilled_messages}")
     lines.extend(["---", "", f"# {session.title}", ""])
 
     for message in session.messages:

@@ -19,3 +19,7 @@ class SessionRecord(NamedTuple):
     project_directory: str = ""
     models_used: list[str] = []
     surface: str = ""
+    # Optional transcript-integrity metadata (currently Claude Code only).
+    truncation_signals: list[str] = []
+    earliest_known_activity: str = ""
+    backfilled_messages: int = 0
