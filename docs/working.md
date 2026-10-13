@@ -1,5 +1,11 @@
 ## Changelog
 
+### 2026-10-13
+
+- Claude Code truncation detection. Sessions driven through Claude Code Remote / Remote Control can have their local transcript rewritten to start at a later compaction boundary; the exporter used to archive the remaining half silently. The adapter now checks three local signals: `parent_uuid_missing`, `starts_with_continuation_summary`, and `subagent_activity_before_transcript` (sibling `subagents/*.jsonl` files start earlier, read prefix-only). Affected archives gain optional `transcript_truncated`, `truncation_signals`, and `earliest_known_activity` frontmatter keys, and the CLI prints one stderr warning per affected session pointing to the recovery section in `skill.md`. Output for sessions without signals is byte-identical.
+- Cloud backfill merge. `--claude-backfill-dir` (default `<base-dir>/claude_code_backfill/`) holds `<local_session_id>.jsonl` files of messages an agent recovered from the cloud transcript. Messages earlier than the first local message are sorted, de-duplicated, and prepended; overlapping ones are ignored. `date` moves to the earliest message and `backfilled_messages: N` is added. Per-session state records `backfill_mtime_ns`, so a changed backfill file re-exports the session even when the local transcript is unchanged.
+- Documented the agent-side recovery procedure (Claude Code Remote MCP `get_session` / `list_sessions` / `list_events` paging) and the `--since-date` + `--full` overwrite caveat in `skill.md` and `README.md`. Added synthetic tests in `tests/test_claude_truncation.py`. A dry run against a real local archive flagged well under 1% of sessions, so the signals are not noisy.
+
 ### 2026-09-27
 
 - DSH discovery now accepts immutable generations `session.vN.jsonl` and `session.vN.jsonl.zstd` in addition to legacy `session.jsonl` / `session.jsonl.zstd`. Each session directory exports only its highest generation, so a migrated predecessor cannot win the session-id dedupe and hide later turns. Two encodings of that same version resolve by latest mtime, then filename. Non-canonical names (`.v0`, leading zeros, backups, `session.lock`) are ignored. The V4 dialogue fields the parser already reads (`user/message` text, assembled `assistant/message` text, `source.provider` / `source.model`) are unchanged, so no parser edit was required.
@@ -92,6 +98,9 @@
 - Added `docs/` with `prd.md`, `rfc.md`, `test.md`, and this file.
 
 ## Lessons Learned
+
+- **A local transcript is not necessarily the whole session.** Claude Code Remote can rewrite the local jsonl to start at a compaction boundary, so a clean parse can still be half a conversation. The file itself carries the evidence (a dangling first `parentUuid`, a leading continuation summary), and sibling subagent transcripts keep timestamps from the lost range. An exporter should surface integrity signals rather than trust the file shape. Recovery needs the cloud transcript, so it belongs to an agent with network tools, and the exporter only merges the result from a local file.
+- **`--full` is only as good as the current source.** A full re-export with `--since-date` overwrites archives from whatever is on disk now. If the source lost history, the archive copy that still had it is overwritten too. Merged backfill and integrity markers make that loss visible and recoverable.
 
 - **Stable output identity needs a migration path.** Replacing a global cursor with an empty per-session map alone duplicates existing archives on upgrade. Adopt files by frontmatter session identity before allocating a filename; dates and sanitized titles are not ownership keys.
 

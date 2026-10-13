@@ -27,6 +27,7 @@ The primary users are individual developers who run multiple AI coding agents lo
 7. Support `--source <name>` to export a single source, or `all` (default) for every source.
 8. Provide deterministic file naming (`YYYYMMDD_<sanitized-title>.md`) with collision-safe suffixes.
 9. Drop noise: tool-call echos, sub-agent chatter, sidechain events, and system-role messages are not exported.
+10. Never export a truncated Claude Code transcript silently. When the local transcript appears to start mid-session (a rewritten Claude Code Remote session), mark the archive and warn on stderr. Allow messages recovered from the cloud transcript to be merged from a local backfill file (`--claude-backfill-dir`, default `<base-dir>/claude_code_backfill/`). The exporter itself still never touches the network; recovery is an agent-side procedure documented in `skill.md`.
 
 ### Non-Functional
 
@@ -50,7 +51,7 @@ The primary users are individual developers who run multiple AI coding agents lo
 | Source | Native Data Location | Incremental Cursor |
 |---|---|---|
 | OpenCode | `~/.local/share/opencode/opencode.db` (SQLite) | `opencode.last_session_time` (ms epoch) |
-| Claude Code | `~/.claude/projects/**/*.jsonl` plus history at `~/.claude/history.jsonl` | Per-session latest timestamp, stable output filename, and recorded source mtime; existing archives are adopted by frontmatter identity on upgrade, including under `--full` |
+| Claude Code | `~/.claude/projects/**/*.jsonl` plus history at `~/.claude/history.jsonl` | Per-session latest timestamp, stable output filename, recorded source mtime, and backfill-file mtime when one exists; existing archives are adopted by frontmatter identity on upgrade, including under `--full` |
 | Codex | `~/.codex/sessions/**/*.jsonl`, `~/.codex/archived_sessions/*.jsonl`, and `~/.codex/session_index.jsonl` | Per-session latest timestamp, output filename, and source mtime |
 | Google Antigravity | `~/.gemini/antigravity/brain/*/.system_generated/logs/transcript_full.jsonl` (2.0), `~/.gemini/antigravity-ide/brain/*/...` (IDE), and `~/.gemini/antigravity-cli/brain/*/...` (CLI) | Per-surface, per-session source fingerprint, parse status, latest timestamp, and output filename |
 | Cursor | `~/Library/Application Support/Cursor/User/globalStorage/state.vscdb` (SQLite) | Per-session latest timestamp and output filename |
@@ -73,6 +74,10 @@ message_count: <int>
 project_directory: "<path>"
 models_used: ["model-a", "model-b"]
 turn_models: ["model-a", "model-a"]
+transcript_truncated: true
+truncation_signals: ["parent_uuid_missing"]
+earliest_known_activity: "<ISO 8601 timestamp>"
+backfilled_messages: <int>
 ---
 # <session title>
 
@@ -94,6 +99,8 @@ Field rules:
 - `project_directory` is emitted only when non-empty (Antigravity and Second Mind never set it).
 - `models_used` is emitted only when non-empty; Antigravity leaves it empty because model identity is not exposed in its transcript steps.
 - `turn_models` is emitted when at least one turn has attributable model identity. It is a JSON array aligned one-to-one with all rendered turn sections, uses `null` for unknown entries, and is omitted when every entry is unknown. Consumers must not infer per-turn attribution from `models_used`.
+- `transcript_truncated`, `truncation_signals`, and `earliest_known_activity` are optional and currently emitted only for Claude Code. `transcript_truncated: true` and the JSON array `truncation_signals` appear together when at least one signal fires: `parent_uuid_missing`, `starts_with_continuation_summary`, or `subagent_activity_before_transcript`. `earliest_known_activity` is the earliest subagent timestamp, emitted only when that last signal fires.
+- `backfilled_messages` is optional (Claude Code only) and counts messages merged from a backfill file ahead of the local transcript; when present, `date` is the earliest merged message's date.
 - Each turn header is `## User` or `## Assistant`. When a per-turn timestamp is known, it is appended as `[HH:MM]` in local time.
 - The file is single-trailing-newline terminated; trailing whitespace is stripped from each message body.
 

@@ -40,6 +40,7 @@ def run_export(
     since_date: date | None = None,
     claude_project_dirs: tuple[Path, ...] | None = None,
     claude_history_files: tuple[Path, ...] | None = None,
+    claude_backfill_dir: Path | None = None,
     codex_session_dirs: tuple[Path, ...] | None = None,
     codex_session_index: Path = DEFAULT_CODEX_SESSION_INDEX,
     cursor_db: Path = DEFAULT_CURSOR_DB,
@@ -82,6 +83,7 @@ def run_export(
                 since_date=since_date,
                 project_dirs=claude_project_dirs or DEFAULT_CLAUDE_PROJECT_DIRS,
                 history_files=claude_history_files or DEFAULT_CLAUDE_HISTORY_FILES,
+                backfill_dir=claude_backfill_dir or base_dir / "claude_code_backfill",
             )
         )
     if source in {"antigravity", "all"}:
@@ -153,6 +155,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--second-mind-json", type=Path, default=SECOND_MIND_JSON, help="Override second mind JSON path.")
     parser.add_argument("--opencode-db", type=Path, default=DEFAULT_OPENCODE_DB, help="Override OpenCode database path.")
     parser.add_argument(
+        "--claude-backfill-dir",
+        type=Path,
+        help=(
+            "Directory of <claude-session-id>.jsonl files holding messages recovered from the cloud "
+            "transcript of a truncated Claude Code session (default: <base-dir>/claude_code_backfill/)."
+        ),
+    )
+    parser.add_argument(
         "--antigravity-dir",
         type=Path,
         help="Override all default Antigravity surfaces with one IDE-compatible brain directory.",
@@ -200,6 +210,7 @@ def main() -> None:
         second_mind_json=args.second_mind_json,
         opencode_db=args.opencode_db,
         antigravity_brain_dir=args.antigravity_dir,
+        claude_backfill_dir=getattr(args, "claude_backfill_dir", None),
         codex_session_dirs=tuple(args.codex_dir) if args.codex_dir else None,
         codex_session_index=args.codex_session_index,
         cursor_db=args.cursor_db,
