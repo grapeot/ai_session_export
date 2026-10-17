@@ -11,6 +11,7 @@ antigravity/
 claude_code/
 codex/
 cursor/
+cursor_cli/
 opencode/
 second_mind/
 .env

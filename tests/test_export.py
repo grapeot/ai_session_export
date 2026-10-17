@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -272,6 +273,36 @@ def _seed_cursor_db(db_path: Path) -> None:
         )
     conn.commit()
     conn.close()
+
+
+CURSOR_CLI_FIXTURE_SESSION_ID = "00000000-0000-4000-8000-0000000000c9"
+
+
+def _seed_cursor_cli_chats(chats_dir: Path) -> None:
+    """One content-addressed Cursor CLI store whose root lists its messages in field 1."""
+    cwd = "/home/user/project"
+    session_dir = chats_dir / hashlib.md5(cwd.encode()).hexdigest() / CURSOR_CLI_FIXTURE_SESSION_ID
+    session_dir.mkdir(parents=True)
+    messages = [
+        {"role": "system", "content": "fixture system prompt",
+         "providerOptions": {"cursor": {"systemPromptFingerprint": {"model": "fixture-cli-model"}}}},
+        {"role": "user", "content": [{"type": "text", "text": "<user_query>Review the CLI fixture</user_query>"}]},
+        {"id": "a1", "role": "assistant", "content": [{"type": "text", "text": "The CLI fixture looks good."}]},
+    ]
+    rows = [(hashlib.sha256(data).hexdigest(), data) for data in (json.dumps(m).encode() for m in messages)]
+    root = b"".join(b"\x0a\x20" + bytes.fromhex(blob_id) for blob_id, _ in rows)
+    root_id = hashlib.sha256(root).hexdigest()
+    created_ms = int(datetime(2026, 6, 29, 9, 0).timestamp() * 1000)
+    conn = sqlite3.connect(session_dir / "store.db")
+    conn.executescript("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT); CREATE TABLE blobs (id TEXT PRIMARY KEY, data BLOB);")
+    conn.executemany("INSERT INTO blobs VALUES (?, ?)", rows + [(root_id, root)])
+    meta0 = {"agentId": CURSOR_CLI_FIXTURE_SESSION_ID, "latestRootBlobId": root_id, "createdAt": created_ms}
+    conn.execute("INSERT INTO meta VALUES ('0', ?)", (json.dumps(meta0).encode().hex(),))
+    conn.commit()
+    conn.close()
+    (session_dir / "meta.json").write_text(json.dumps(
+        {"schemaVersion": 1, "createdAtMs": created_ms, "updatedAtMs": created_ms + 60_000, "cwd": cwd}
+    ))
 
 
 def _write_second_mind_json(path: Path) -> None:
@@ -2264,6 +2295,9 @@ def test_cli_run_export_all_sources(tmp_path: Path) -> None:
     cursor_db = tmp_path / "cursor.vscdb"
     _seed_cursor_db(cursor_db)
 
+    cursor_cli_dir = tmp_path / "cursor_cli_chats"
+    _seed_cursor_cli_chats(cursor_cli_dir)
+
     dsh_dir = tmp_path / "dsh_sessions"
     _write_dsh_session(dsh_dir)
 
@@ -2282,6 +2316,7 @@ def test_cli_run_export_all_sources(tmp_path: Path) -> None:
         codex_session_dirs=(codex_dir,),
         codex_session_index=codex_index,
         cursor_db=cursor_db,
+        cursor_cli_dir=cursor_cli_dir,
         dsh_sessions_dir=dsh_dir,
         gemini_dir=tmp_path / "absent-gemini",
         grok_sessions_dir=tmp_path / "absent-grok",
@@ -2295,13 +2330,16 @@ def test_cli_run_export_all_sources(tmp_path: Path) -> None:
         "antigravity",
         "codex",
         "cursor",
+        "cursor_cli",
         "dsh",
         "gemini",
         "grok",
     }
+    cursor_cli_result = next(r for r in results if r["source"] == "cursor_cli")
+    assert cursor_cli_result == {"source": "cursor_cli", "scanned": 1, "exported": 1}
 
     # Each default source produced at least one markdown file under base_dir.
-    for sub in ("opencode", "claude_code", "antigravity", "codex", "cursor", "dsh"):
+    for sub in ("opencode", "claude_code", "antigravity", "codex", "cursor", "cursor_cli", "dsh"):
         assert list((tmp_path / sub).glob("*.md")), f"no markdown emitted for {sub}"
 
     # State file was persisted with refreshed counters.
@@ -2313,6 +2351,7 @@ def test_cli_run_export_all_sources(tmp_path: Path) -> None:
     assert antigravity_sessions["antigravity-session-fixture"]["status"] == "complete"
     assert persisted["codex"]["sessions"]["codex-fixture-1"]["latest_timestamp"] > 0
     assert persisted["cursor"]["sessions"]["a6f723dc-9c5b-4169-b03f-31abb1e6069b"]["latest_timestamp"] > 0
+    assert persisted["cursor_cli"]["sessions"][CURSOR_CLI_FIXTURE_SESSION_ID]["root_blob_id"]
     assert persisted["dsh"]["sessions"][DSH_FIXTURE_SESSION_ID]["latest_timestamp"] > 0
 
 
@@ -2351,6 +2390,7 @@ def test_cli_main_reports_partial_antigravity_failure(monkeypatch: pytest.Monkey
         codex_dir=None,
         codex_session_index=Path("/tmp/example-codex-index.jsonl"),
         cursor_db=Path("/tmp/example-cursor.db"),
+        cursor_cli_dir=Path("/tmp/example-cursor-chats"),
         dsh_sessions_dir=Path("/tmp/example-dsh-sessions"),
         gemini_dir=Path("/tmp/example-gemini"),
         grok_sessions_dir=Path("/tmp/example-grok-sessions"),

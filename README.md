@@ -13,6 +13,7 @@ Export AI coding session transcripts from multiple tools into a unified Markdown
 | Google Antigravity IDE | `~/.gemini/antigravity-ide/brain/*/.system_generated/logs/transcript_full.jsonl` |
 | Google Antigravity CLI | `~/.gemini/antigravity-cli/brain/*/.system_generated/logs/transcript_full.jsonl` |
 | Cursor | `~/Library/Application Support/Cursor/User/globalStorage/state.vscdb` |
+| Cursor CLI (`cursor agent`) | `~/.cursor/chats/*/*/store.db` and `meta.json` |
 | DeepSeek Harness | `~/.dsh/sessions/*/*/session[.vN].jsonl[.zstd]` |
 | Gemini CLI | `~/.gemini/tmp/*/chats/session-*.json` or `.jsonl` |
 | Grok Build | `~/.grok/sessions/*/*/updates.jsonl` and `summary.json` |
@@ -36,6 +37,7 @@ python export_sessions.py --source antigravity
 python export_sessions.py --source second-mind
 python export_sessions.py --source codex
 python export_sessions.py --source cursor
+python export_sessions.py --source cursor-cli
 python export_sessions.py --source dsh
 python export_sessions.py --source gemini
 python export_sessions.py --source grok
@@ -147,6 +149,23 @@ Export sessions created by the Grok Build platform (`xai-org/grok-build`).
   - Follows session rewinds correctly to maintain clean chronological outputs.
   - Omits thoughts, tool execution steps, hidden host prompts, and nested subagent sessions.
   - Uses the summary model as session-level inventory only; never assigns it to earlier turns.
+
+## Cursor CLI
+
+Export sessions created by the Cursor CLI agent (`cursor agent`). This is a
+separate source from the Cursor IDE: the storage formats and session id
+namespaces do not overlap. Archives use `source: cursor_cli` and the
+`cursor_cli/` output directory.
+
+- **CLI Options**: `--source cursor-cli --cursor-cli-dir <path>` (defaults to `~/.cursor/chats`). Included in `all`.
+- **Implementation Details**:
+  - Each session is `~/.cursor/chats/<md5(cwd)>/<session-uuid>/` with a content-addressed `store.db` (`blobs.id == sha256(data)`) and an optional `meta.json`.
+  - Opens closed stores with `mode=ro&immutable=1` and live stores (a `store.db-wal` is present) with `mode=ro`, so the source directory is never modified.
+  - Turn order comes from the latest root snapshot (repeated protobuf field 1 of `latestRootBlobId`), never from `rowid`. Repeated references render once per occurrence; blobs the live branch no longer references (rewinds) are ignored.
+  - After a context compaction, the pre-compaction turns exist only in older root snapshots. They are stitched back in front of the latest root. If the snapshots cannot be ordered safely, the export falls back to the latest root and reports a warning.
+  - Keeps only `<user_query>` text from human turns and `text` parts from assistant turns. Drops `<user_info>`, reminders, notifications, compaction summaries, system prompts, reasoning, tool calls, and tool results. Subagent sessions are skipped.
+  - Takes models from the system prompt fingerprint, the date from `meta.json` `createdAtMs` (falling back to the store metadata), and the project directory from `meta.json` `cwd` or a `Workspace Path:` line whose md5 matches the workspace directory name.
+  - Incremental state records the root blob id along with the update timestamp, because sessions without `meta.json` have no live-updated timestamp.
 
 
 ## Output Format
