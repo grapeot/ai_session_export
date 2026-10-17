@@ -7,10 +7,20 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
-from .sources import export_antigravity, export_claude_code, export_codex, export_cursor, export_dsh, export_opencode, export_second_mind
+from .sources import (
+    export_antigravity,
+    export_claude_code,
+    export_codex,
+    export_cursor,
+    export_cursor_cli,
+    export_dsh,
+    export_opencode,
+    export_second_mind,
+)
 from .sources.claude_code import DEFAULT_CLAUDE_HISTORY_FILES, DEFAULT_CLAUDE_PROJECT_DIRS
 from .sources.codex import DEFAULT_CODEX_SESSION_DIRS, DEFAULT_CODEX_SESSION_INDEX
 from .sources.cursor import DEFAULT_CURSOR_DB
+from .sources.cursor_cli import DEFAULT_CURSOR_CLI_DIR
 from .sources.dsh import DEFAULT_DSH_SESSIONS_DIR
 from .sources.gemini import DEFAULT_GEMINI_DIR, export_gemini
 from .sources.grok import DEFAULT_GROK_SESSIONS_DIR, export_grok
@@ -23,7 +33,7 @@ SECOND_MIND_JSON = BASE_DIR / "second_mind_export.json"
 STATE_FILE = BASE_DIR / ".export_state.json"
 DEFAULT_OPENCODE_DB = Path.home() / ".local" / "share" / "opencode" / "opencode.db"
 
-SOURCE_CHOICES = ["all", "second-mind", "opencode", "claude-code", "antigravity", "codex", "cursor", "dsh", "gemini", "grok"]
+SOURCE_CHOICES = ["all", "second-mind", "opencode", "claude-code", "antigravity", "codex", "cursor", "cursor-cli", "dsh", "gemini", "grok"]
 
 
 def run_export(
@@ -44,6 +54,7 @@ def run_export(
     codex_session_dirs: tuple[Path, ...] | None = None,
     codex_session_index: Path = DEFAULT_CODEX_SESSION_INDEX,
     cursor_db: Path = DEFAULT_CURSOR_DB,
+    cursor_cli_dir: Path = DEFAULT_CURSOR_CLI_DIR,
     dsh_sessions_dir: Path = DEFAULT_DSH_SESSIONS_DIR,
     gemini_dir: Path = DEFAULT_GEMINI_DIR,
     grok_sessions_dir: Path = DEFAULT_GROK_SESSIONS_DIR,
@@ -121,6 +132,17 @@ def run_export(
                 since_date=since_date,
             )
         )
+    if source in {"cursor-cli", "all"}:
+        results.append(
+            export_cursor_cli(
+                base_dir / "cursor_cli",
+                state,
+                chats_dir=cursor_cli_dir,
+                full=full,
+                dry_run=dry_run,
+                since_date=since_date,
+            )
+        )
     if source in {"dsh", "all"}:
         results.append(
             export_dsh(
@@ -186,6 +208,12 @@ def parse_args() -> argparse.Namespace:
         help="Override the Cursor state.vscdb path.",
     )
     parser.add_argument(
+        "--cursor-cli-dir",
+        type=Path,
+        default=DEFAULT_CURSOR_CLI_DIR,
+        help="Override the Cursor CLI chats root (~/.cursor/chats).",
+    )
+    parser.add_argument(
         "--dsh-sessions-dir",
         type=Path,
         default=DEFAULT_DSH_SESSIONS_DIR,
@@ -214,6 +242,7 @@ def main() -> None:
         codex_session_dirs=tuple(args.codex_dir) if args.codex_dir else None,
         codex_session_index=args.codex_session_index,
         cursor_db=args.cursor_db,
+        cursor_cli_dir=args.cursor_cli_dir,
         dsh_sessions_dir=args.dsh_sessions_dir,
         gemini_dir=args.gemini_dir,
         grok_sessions_dir=args.grok_sessions_dir,

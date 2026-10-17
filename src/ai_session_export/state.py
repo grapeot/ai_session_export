@@ -13,6 +13,7 @@ DEFAULT_STATE = {
     "codex": {"sessions": {}},
     "antigravity": {"last_timestamp": 0, "legacy_cursor_migrated": False, "surfaces": {}},
     "cursor": {"sessions": {}},
+    "cursor_cli": {"sessions": {}},
     "dsh": {"sessions": {}},
     "gemini": {"sessions": {}},
     "grok": {"sessions": {}},

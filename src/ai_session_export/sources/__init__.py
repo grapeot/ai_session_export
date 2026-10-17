@@ -4,6 +4,7 @@ from .antigravity import export_antigravity
 from .claude_code import export_claude_code
 from .codex import export_codex
 from .cursor import export_cursor
+from .cursor_cli import export_cursor_cli
 from .dsh import export_dsh
 from .gemini import export_gemini
 from .grok import export_grok
@@ -15,6 +16,7 @@ __all__ = [
     "export_claude_code",
     "export_codex",
     "export_cursor",
+    "export_cursor_cli",
     "export_dsh",
     "export_gemini",
     "export_grok",

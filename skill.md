@@ -2,7 +2,7 @@
 name: ai-session-export
 description: >-
   Export AI coding session transcripts from OpenCode, Claude Code, Codex, Google
-  Antigravity, Cursor, DeepSeek Harness, Gemini CLI, Grok Build, and Second Mind into a unified Markdown
+  Antigravity, Cursor, Cursor CLI, DeepSeek Harness, Gemini CLI, Grok Build, and Second Mind into a unified Markdown
   archive. Run as a CLI or periodic cron job.
 ---
 
@@ -39,6 +39,7 @@ python export_sessions.py --source antigravity
 python export_sessions.py --source second-mind
 python export_sessions.py --source codex
 python export_sessions.py --source cursor
+python export_sessions.py --source cursor-cli
 python export_sessions.py --source dsh
 python export_sessions.py --source gemini
 python export_sessions.py --source grok
@@ -57,6 +58,7 @@ python export_sessions.py --opencode-db /path/to/opencode.db
 python export_sessions.py --antigravity-dir /path/to/brain
 python export_sessions.py --codex-dir /path/to/codex/sessions
 python export_sessions.py --cursor-db /path/to/state.vscdb
+python export_sessions.py --cursor-cli-dir /path/to/.cursor/chats
 python export_sessions.py --dsh-sessions-dir /path/to/.dsh/sessions
 python export_sessions.py --gemini-dir /path/to/.gemini/tmp
 python export_sessions.py --grok-sessions-dir /path/to/.grok/sessions
@@ -67,6 +69,11 @@ python export_sessions.py --source claude-code --claude-backfill-dir /path/to/ba
 
 The Antigravity source scans 2.0, IDE, and CLI by default. `--antigravity-dir`
 retains the legacy single-root override and treats that root as IDE-compatible.
+
+The Cursor CLI source (`--source cursor-cli`, frontmatter `source: cursor_cli`)
+is separate from the Cursor IDE source and is part of `all`. It orders turns by
+the latest root snapshot rather than SQLite `rowid`, and stitches in
+pre-compaction turns from older snapshots.
 
 The default private output root is `~/.local/share/ai-session-export/`. Override
 it with `--base-dir` and keep real transcripts outside public repositories.
@@ -191,6 +198,7 @@ whenever its backfill file changes, even if the local transcript did not.
 | Antigravity IDE | `~/.gemini/antigravity-ide/brain/*/.system_generated/logs/transcript_full.jsonl` | JSONL |
 | Antigravity CLI | `~/.gemini/antigravity-cli/brain/*/.system_generated/logs/transcript_full.jsonl` | JSONL |
 | Cursor | `~/Library/Application Support/Cursor/User/globalStorage/state.vscdb` | SQLite |
+| Cursor CLI | `~/.cursor/chats/*/*/store.db` + `meta.json` | SQLite (content-addressed blobs, protobuf root snapshots) + JSON |
 | DeepSeek Harness | `~/.dsh/sessions/*/*/session[.vN].jsonl[.zstd]` | JSONL or Zstandard; select the newest generation per session directory (currently V4) |
 | Gemini CLI | `~/.gemini/tmp/*/chats/session-*.json` or `.jsonl` | JSON / JSONL |
 | Grok Build | `~/.grok/sessions/*/*/updates.jsonl` + `summary.json` | JSONL + JSON |
