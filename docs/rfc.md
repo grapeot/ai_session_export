@@ -71,7 +71,7 @@ Claude Code sessions driven through Claude Code Remote / Remote Control can have
 
 Any signal marks the record and adds a per-session warning (`session_id` plus a message naming the first local timestamp, the signals, and the `skill.md` recovery section) to the adapter's `warnings`. The CLI prints it to stderr without counting a failure.
 
-Backfill files live in `--claude-backfill-dir` (default `<base-dir>/claude_code_backfill/`) as `<local_session_id>.jsonl`, one `{"created_at", "role", "text"}` object per line. Invalid lines are skipped with a warning. Recovered turns strictly earlier than the first local message are sorted, de-duplicated by `(time, role, text)`, and prepended; overlapping turns are dropped because the local transcript is authoritative for its own range. `date` moves to the earliest merged turn (UTC), and when no history title exists, the first recovered user message replaces the compaction summary as the fallback title. Existing output identity is unchanged, so a backfilled session rewrites its current archive file.
+Backfill files live in `--claude-backfill-dir` (default `<base-dir>/claude_code_backfill/`) as `<local_session_id>.jsonl`, one `{"created_at", "role", "text"}` object per line. Invalid lines are skipped with a warning. Recovered turns strictly earlier than the first local message are sorted, de-duplicated by `(time, role, text)`, and prepended; overlapping turns are dropped because the local transcript is authoritative for its own range. `date` moves to the earliest merged turn in the exporter host's local timezone, and when no history title exists, the first recovered user message replaces the compaction summary as the fallback title. The prior archive is rewritten in place; if the backfilled date changes the date prefix, the file is renamed to the corrected name.
 
 ## Cursor Adapter Design
 
@@ -132,7 +132,7 @@ Other adapter decisions:
 
 - The session title is the first line of the first kept user message, truncated to 120 characters.
 - `models_used` is always an empty list for Antigravity — model identity is not surfaced in the transcript steps.
-- The session `date` is the calendar date of the earliest step that has a parseable `created_at`.
+- The session `date` is the calendar date of the earliest step that has a parseable `created_at`, in the exporter host's local timezone. Per-turn `[HH:MM]` headers use the same local basis.
 - A session with no kept messages, a zero `latest_timestamp_ms`, or no `started_at` is skipped entirely.
 - Every JSONL line must decode to a JSON object with string fields where required. Syntax, shape, and field-type errors are isolated to that session and returned as privacy-safe structured warnings containing only the surface, line number, and error summary.
 - A malformed session is recorded with `status: failed`, is retried on the next run, and never blocks valid sessions from other surfaces. The CLI reports the failure count and exits non-zero after successful sessions and state have been written.
@@ -172,8 +172,8 @@ Each adapter carries its own cursor semantics because the sources expose time di
 
 - **Second Mind** has no per-conversation timestamp exposed reliably, so the cursor is a count of conversations already exported; on each run it exports only the conversations beyond that count.
 - **OpenCode** uses `session.time_created` (ms epoch) and re-queries rows with `time_created > last_session_time`.
-- **Claude Code** compares each transcript's `latest_timestamp_ms` with its own `sessions[session_id].latest_timestamp`. An incremental run skips only when that timestamp has not advanced, the mapped output file exists, and the backfill file's mtime equals the recorded `backfill_mtime_ns` (the key is present only when a backfill file existed at the last write). Successful writes record `latest_timestamp`, `output_file`, and `source_mtime_ns`; mtime does not bypass parsing. Existing output mappings are reused even if the title changes.
-- **Antigravity** keeps independent per-session state inside each product surface. Unchanged mtime/size fingerprints skip reparsing, changed sessions rewrite their prior output file, failed sessions remain retryable, and identical session ids on different surfaces do not collide in state.
+- **Claude Code** compares each transcript's `latest_timestamp_ms` with its own `sessions[session_id].latest_timestamp`. An incremental run skips only when that timestamp has not advanced, the mapped output file exists, and the backfill file's mtime equals the recorded `backfill_mtime_ns` (the key is present only when a backfill file existed at the last write). Successful writes record `latest_timestamp`, `output_file`, and `source_mtime_ns`; mtime does not bypass parsing. Existing output mappings are reused when the title changes; a changed session date renames the file to the corrected date prefix.
+- **Antigravity** keeps independent per-session state inside each product surface. Unchanged mtime/size fingerprints skip reparsing, changed sessions rewrite their prior output file, failed sessions remain retryable, and identical session ids on different surfaces do not collide in state. A re-export renames the prior file when its date prefix no longer matches the corrected session date.
 - **Codex** uses per-session state because active rollout files keep growing and archived sessions can move between directories. The adapter rewrites the same output file when a session changes and skips unchanged files by source mtime.
 - **Cursor** uses per-session state because composer bubbles grow in place and the composer id namespace does not fully overlap the header table. The adapter rewrites the same output file when a session's max timestamp advances and skips unchanged composers whose output already exists.
 
@@ -184,7 +184,7 @@ The deprecated `antigravity.last_timestamp` is retained only as a one-time migra
 Two correctness properties are enforced uniformly:
 
 1. `--dry-run` runs the full scan and returns accurate counts but writes no files and does not persist state. Claude Code also leaves the caller's state and output directory unchanged.
-2. `--full` bypasses freshness checks while retaining parser filters and `--since-date`. Claude Code still reuses or adopts output identity, so repeated full exports do not add files for the same session.
+2. `--full` bypasses freshness checks while retaining parser filters and `--since-date`. Claude Code still reuses or adopts output identity, so repeated full exports do not add files for the same session. When the session date changed, adapters using `resolve_output_path()` rename the prior file to the corrected date prefix instead of leaving a stale name.
 
 `state.py` deep-copies `DEFAULT_STATE` on load and `setdefault`s per-source defaults on top of any persisted file, so a missing or partially-populated state file degrades gracefully to fresh cursors rather than crashing.
 

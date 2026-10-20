@@ -69,7 +69,7 @@ source: <source-name>
 surface: "<optional product surface>"
 session_id: "<opaque id>"
 title: "<session title>"
-date: "YYYY-MM-DD"
+date: "YYYY-MM-DD"        # calendar date of the first turn in the exporter host's local timezone
 message_count: <int>
 project_directory: "<path>"
 models_used: ["model-a", "model-b"]
@@ -100,7 +100,8 @@ Field rules:
 - `models_used` is emitted only when non-empty; Antigravity leaves it empty because model identity is not exposed in its transcript steps.
 - `turn_models` is emitted when at least one turn has attributable model identity. It is a JSON array aligned one-to-one with all rendered turn sections, uses `null` for unknown entries, and is omitted when every entry is unknown. Consumers must not infer per-turn attribution from `models_used`.
 - `transcript_truncated`, `truncation_signals`, and `earliest_known_activity` are optional and currently emitted only for Claude Code. `transcript_truncated: true` and the JSON array `truncation_signals` appear together when at least one signal fires: `parent_uuid_missing`, `starts_with_continuation_summary`, or `subagent_activity_before_transcript`. `earliest_known_activity` is the earliest subagent timestamp, emitted only when that last signal fires.
-- `backfilled_messages` is optional (Claude Code only) and counts messages merged from a backfill file ahead of the local transcript; when present, `date` is the earliest merged message's date.
+- `backfilled_messages` is optional (Claude Code only) and counts messages merged from a backfill file ahead of the local transcript; when present, `date` is the earliest merged message's date in the exporter host's local timezone.
+- `date` and every per-turn `[HH:MM]` use the exporter host's local timezone. Consumers combine them into local wall-clock datetimes; a session that crosses midnight can still have turn times earlier than `date`, and must resolve that rollover themselves.
 - Each turn header is `## User` or `## Assistant`. When a per-turn timestamp is known, it is appended as `[HH:MM]` in local time.
 - The file is single-trailing-newline terminated; trailing whitespace is stripped from each message body.
 

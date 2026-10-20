@@ -7,7 +7,7 @@ from typing import Any
 
 from ..markdown import render_markdown
 from ..models import MessageTurn, SessionRecord
-from ..utils import parse_iso_timestamp, should_skip_session, unique_output_path
+from ..utils import parse_iso_timestamp, resolve_output_path, should_skip_session, to_local_date, unique_output_path
 
 
 DEFAULT_GEMINI_DIR = Path.home() / ".gemini" / "tmp"
@@ -126,7 +126,7 @@ def parse_gemini_session_file(file_path: Path) -> SessionRecord | None:
     if should_skip_session(title):
         return None
     # projectHash is not a path, and added directories do not identify the original cwd.
-    return SessionRecord("gemini", session_id, title, started.date().isoformat(), messages,
+    return SessionRecord("gemini", session_id, title, to_local_date(started).isoformat(), messages,
                          models_used=sorted(models))
 
 
@@ -189,11 +189,20 @@ def export_gemini(
             if since_date and date.fromisoformat(record.date) < since_date:
                 continue
             previous = sessions.get(record.session_id, {})
-            output = output_dir / previous["output_file"] if previous else unique_output_path(output_dir, record.date, record.title)
+            previous_output = str(previous.get("output_file") or "")
+            output = (
+                output_dir / Path(previous_output).name
+                if previous_output
+                else unique_output_path(output_dir, record.date, record.title)
+            )
             rendered = render_markdown(record)
             if not full and output.is_file() and output.read_text(encoding="utf-8") == rendered:
                 continue
             if not dry_run:
+                if previous_output:
+                    output = resolve_output_path(
+                        output_dir, previous_output, record.date, record.title
+                    )
                 output_dir.mkdir(parents=True, exist_ok=True)
                 output.write_text(rendered, encoding="utf-8")
                 state.setdefault("gemini", {}).setdefault("sessions", {})[record.session_id] = {"output_file": output.name}
@@ -249,7 +258,7 @@ def _retire_if_rewound_empty(
         # Honor the date scope: the archive was exported under a prior date; if the
         # session's own start predates since_date, its archive is out of scope.
         started = parse_iso_timestamp(_read_start_time(source_path))
-        if started is None or started.date() < since_date:
+        if started is None or to_local_date(started) < since_date:
             return None
     if dry_run:
         return {"path": str(source_path), "session_id": session_id,

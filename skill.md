@@ -79,8 +79,9 @@ The default private output root is `~/.local/share/ai-session-export/`. Override
 it with `--base-dir` and keep real transcripts outside public repositories.
 
 Caveat: `--since-date` combined with `--full` re-writes the archive file of every
-matching session using only the transcript content currently on disk. If a
-source file has since lost history (for example a truncated Claude Code
+matching session using only the transcript content currently on disk. If the
+session date changed, the archive may be renamed to the corrected date prefix.
+If a source file has since lost history (for example a truncated Claude Code
 transcript, see below), the archive loses it too. Back up the archive or recover
 the missing messages into a backfill file first.
 
@@ -112,9 +113,10 @@ I'll examine the reconnection handler...
 
 Frontmatter fields: `source`, optional `surface`, `session_id`, `title`, `date`, `message_count`,
 optional `project_directory`, optional `models_used`, and optional `turn_models`.
-`turn_models` is a JSON array aligned one-to-one with the rendered turn sections;
-unknown entries are `null`. Do not infer turn attribution from session-level
-`models_used`.
+`date` is the first turn's calendar date in the exporter host's local timezone;
+`[HH:MM]` turn headers use the same local clock. `turn_models` is a JSON array
+aligned one-to-one with the rendered turn sections; unknown entries are `null`.
+Do not infer turn attribution from session-level `models_used`.
 Antigravity emits `surface` as `"2"`, `"ide"`, or `"cli"`.
 
 Claude Code may add optional transcript-integrity keys after `turn_models`:

@@ -7,7 +7,14 @@ from typing import Any, NamedTuple
 
 from ..markdown import render_markdown
 from ..models import MessageTurn, SessionRecord
-from ..utils import parse_iso_timestamp, sanitize_filename, should_skip_session, unique_output_path
+from ..utils import (
+    parse_iso_timestamp,
+    resolve_output_path,
+    sanitize_filename,
+    should_skip_session,
+    to_local_date,
+    unique_output_path,
+)
 
 
 DEFAULT_CLAUDE_PROJECT_DIRS = (
@@ -52,8 +59,8 @@ def _ms_to_iso_utc(epoch_ms: int) -> str:
     return text.replace("+00:00", "Z")
 
 
-def _ms_to_utc_date(epoch_ms: int) -> str:
-    return datetime.fromtimestamp(epoch_ms / 1000, tz=timezone.utc).date().isoformat()
+def _ms_to_local_date(epoch_ms: int) -> str:
+    return datetime.fromtimestamp(epoch_ms / 1000).date().isoformat()
 
 
 def _earliest_subagent_timestamp_ms(session_file: Path) -> int | None:
@@ -256,7 +263,7 @@ def parse_claude_session_file(
                 event_ts_ms = int(timestamp.timestamp() * 1000)
                 latest_timestamp_ms = max(latest_timestamp_ms, event_ts_ms)
                 if started_at is None:
-                    started_at = timestamp.date()
+                    started_at = to_local_date(timestamp)
             session_id = event.get("sessionId") or session_id
             cwd = event.get("cwd") or cwd
 
@@ -315,7 +322,7 @@ def parse_claude_session_file(
             backfilled = _merge_backfill(recovered, boundary_ms)
             if backfilled:
                 messages = backfilled + messages
-                session_date = min(session_date, _ms_to_utc_date(backfilled[0].time_created or boundary_ms))
+                session_date = min(session_date, _ms_to_local_date(backfilled[0].time_created or boundary_ms))
                 first_backfilled_user = next((turn.content for turn in backfilled if turn.role == "user"), None)
                 if first_backfilled_user is not None:
                     first_user_text = first_backfilled_user
@@ -394,14 +401,19 @@ def export_claude_code(
         previous = sessions.get(session_id, {})
         previous_timestamp = int(previous.get("latest_timestamp", 0))
         previous_output = str(previous.get("output_file") or "")
-        output_path = output_dir / previous_output if previous_output else None
+        output_path = output_dir / Path(previous_output).name if previous_output else None
         output_exists = output_path is not None and output_path.is_file()
         previous_backfill = previous.get("backfill_mtime_ns")
         backfill_unchanged = parsed.backfill_mtime_ns == (int(previous_backfill) if previous_backfill else None)
         if not full and parsed.latest_timestamp_ms <= previous_timestamp and output_exists and backfill_unchanged:
             continue
 
-        if not previous_output:
+        if previous_output:
+            if not dry_run:
+                output_path = resolve_output_path(
+                    output_dir, previous_output, parsed.record.date, parsed.record.title
+                )
+        else:
             if identity_index is None:
                 identity_index = {}
                 for archive in output_dir.glob("*.md"):

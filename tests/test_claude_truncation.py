@@ -322,7 +322,10 @@ def test_incremental_reexport_when_only_backfill_changes(tmp_path: Path) -> None
     backfill = _write_backfill(tmp_path / "backfill", BACKFILL_ROWS[:1])
     second, state = _export(tmp_path, state=state)
     assert second["exported"] == 1
-    assert list((tmp_path / "out").glob("*.md")) == [output]
+    files = list((tmp_path / "out").glob("*.md"))
+    assert len(files) == 1
+    output = files[0]
+    assert output.name.startswith("20260628_")
     assert "backfilled_messages: 1" in output.read_text(encoding="utf-8")
     recorded = state["claude_code"]["sessions"][SESSION_ID]["backfill_mtime_ns"]
     assert recorded == backfill.stat().st_mtime_ns

@@ -121,8 +121,9 @@ ones are ignored. `date` moves to the earliest message and
 its backfill file changes. See `skill.md` for the step-by-step procedure.
 
 Note that `--since-date` combined with `--full` re-writes matching archives from
-the transcript content currently on disk, so recover truncated sessions before
-running it.
+the transcript content currently on disk. When the session date changed, the
+archive may be renamed to the corrected date prefix. Recover truncated sessions
+before running it.
 
 ## Gemini CLI
 
@@ -200,6 +201,8 @@ When a source can attribute models per turn, `turn_models` is a JSON array align
 one-to-one with the rendered `User` and `Assistant` sections. Unknown entries are
 `null`; the field is omitted when every turn is unknown. `models_used` remains a
 session-level inventory and must not be used to guess per-turn attribution.
+`date` is the first turn's calendar date in the exporter host's local timezone;
+`[HH:MM]` turn headers use the same local clock.
 Antigravity records additionally include `surface: "2"`, `surface: "ide"`, or
 `surface: "cli"`. Claude Code records may include the optional
 `transcript_truncated`, `truncation_signals`, `earliest_known_activity`, and

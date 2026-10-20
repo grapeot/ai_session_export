@@ -7,6 +7,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -42,7 +43,15 @@ from ai_session_export.sources.dsh import (
 from ai_session_export.sources.opencode import export_opencode
 from ai_session_export.sources.second_mind import export_second_mind
 from ai_session_export.state import DEFAULT_STATE, load_state, save_state
-from ai_session_export.utils import ms_to_date, sanitize_filename, should_skip_session, unique_output_path, yaml_string
+from ai_session_export.utils import (
+    ms_to_date,
+    resolve_output_path,
+    sanitize_filename,
+    should_skip_session,
+    to_local_date,
+    unique_output_path,
+    yaml_string,
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -207,6 +216,36 @@ def test_unique_output_path(tmp_path: Path) -> None:
 
     third = unique_output_path(tmp_path, "2026-06-29", "My session title")
     assert third.name == "20260629_My_session_title_3.md"
+
+
+def test_to_local_date_converts_utc_to_local_day() -> None:
+    utc_evening = datetime.fromisoformat("2026-10-19T00:14:11+00:00")
+    previous_tz = os.environ.get("TZ")
+    os.environ["TZ"] = "America/Los_Angeles"
+    if hasattr(time, "tzset"):
+        time.tzset()
+    try:
+        assert to_local_date(utc_evening) == date(2026, 10, 18)
+    finally:
+        if previous_tz is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = previous_tz
+        if hasattr(time, "tzset"):
+            time.tzset()
+    naive = datetime(2026, 10, 18, 17, 14)
+    assert to_local_date(naive) == date(2026, 10, 18)
+
+
+def test_resolve_output_path_renames_stale_date(tmp_path: Path) -> None:
+    stale = tmp_path / "20261019_fixture_session.md"
+    stale.write_text("archive", encoding="utf-8")
+
+    resolved = resolve_output_path(tmp_path, stale.name, "2026-10-18", "fixture session")
+
+    assert resolved.name == "20261018_fixture_session.md"
+    assert resolved.read_text(encoding="utf-8") == "archive"
+    assert not stale.exists()
 
 
 def test_yaml_string() -> None:
@@ -1094,6 +1133,53 @@ def test_antigravity_export_with_fixture(tmp_path: Path) -> None:
     assert "I'll look at the auth.py file first." in text
     assert "The bug is on line 42" in text
     assert "view_file" not in text
+
+
+def test_antigravity_evening_utc_timestamp_uses_local_date(tmp_path: Path) -> None:
+    brain_dir = tmp_path / "brain"
+    transcript_dir = brain_dir / "evening-session" / ".system_generated" / "logs"
+    transcript_dir.mkdir(parents=True)
+    (transcript_dir / "transcript_full.jsonl").write_text(
+        json.dumps(
+            {
+                "step_index": 0,
+                "source": "USER_EXPLICIT",
+                "type": "USER_INPUT",
+                "status": "DONE",
+                "created_at": "2026-10-19T00:14:11Z",
+                "content": "<USER_REQUEST>\nRewrite the notice\n</USER_REQUEST>",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    previous_tz = os.environ.get("TZ")
+    os.environ["TZ"] = "America/Los_Angeles"
+    if hasattr(time, "tzset"):
+        time.tzset()
+    try:
+        result = export_antigravity(
+            tmp_path / "antigravity",
+            {"antigravity": {"last_timestamp": 0}},
+            brain_dir=brain_dir,
+            full=True,
+            dry_run=False,
+            since_date=None,
+        )
+    finally:
+        if previous_tz is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = previous_tz
+        if hasattr(time, "tzset"):
+            time.tzset()
+
+    assert result["exported"] == 1
+    text = next((tmp_path / "antigravity").glob("*.md")).read_text(encoding="utf-8")
+    assert 'date: "2026-10-18"' in text
+    assert "## User [17:14]" in text
+    assert next((tmp_path / "antigravity").glob("*.md")).name.startswith("20261018_")
 
 
 def test_antigravity_exports_all_surfaces_incrementally(tmp_path: Path) -> None:

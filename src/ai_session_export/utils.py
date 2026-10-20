@@ -70,6 +70,36 @@ def ms_to_hhmm(epoch_ms: int) -> str:
     return datetime.fromtimestamp(epoch_ms / 1000).strftime("%H:%M")
 
 
+def to_local_date(value: datetime) -> date:
+    """Session date in local time, matching the local HH:MM turn headers.
+
+    Agent transcripts usually store timestamps as UTC (``...Z``). Using the UTC
+    date while rendering local turn times files evening sessions under the next
+    day, so downstream window filters (e.g. eink_diary) replay yesterday's work.
+    Naive values are treated as already-local wall-clock time.
+    """
+    if value.tzinfo is not None:
+        return value.astimezone().date()
+    return value.date()
+
+
+def resolve_output_path(
+    output_dir: Path, previous_output: str, date_ymd: str, title: str
+) -> Path:
+    """Keep an existing archive file, renaming it when its date prefix is stale."""
+    if previous_output:
+        previous = output_dir / Path(previous_output).name
+        if not previous.is_file():
+            return previous
+        expected_prefix = date_ymd.replace("-", "") + "_"
+        if previous.name.startswith(expected_prefix):
+            return previous
+        renamed = unique_output_path(output_dir, date_ymd, title)
+        previous.replace(renamed)
+        return renamed
+    return unique_output_path(output_dir, date_ymd, title)
+
+
 def parse_iso_timestamp(value: str) -> datetime | None:
     text = (value or "").strip()
     if not text:
