@@ -9,7 +9,7 @@ from typing import Any, NamedTuple
 
 from ..markdown import render_markdown
 from ..models import MessageTurn, SessionRecord
-from ..utils import parse_iso_timestamp, unique_output_path
+from ..utils import parse_iso_timestamp, resolve_output_path, to_local_date, unique_output_path
 
 
 DEFAULT_ANTIGRAVITY_BRAIN_DIRS = {
@@ -90,7 +90,7 @@ def _parse_transcript(file_path: Path, session_id: str, surface: str) -> ParsedA
                 step_ts_ms = int(timestamp.timestamp() * 1000)
                 latest_timestamp_ms = max(latest_timestamp_ms, step_ts_ms)
                 if started_at is None:
-                    started_at = timestamp.date()
+                    started_at = to_local_date(timestamp)
 
             step_type = _string_field(step, "type", line_number)
             source = _string_field(step, "source", line_number)
@@ -253,8 +253,13 @@ def export_antigravity(
                 continue
 
             previous_output = str(previous.get("output_file") or "")
-            output_path = output_dir / previous_output if previous_output else None
-            if output_path is None:
+            if previous_output and not dry_run:
+                output_path = resolve_output_path(
+                    output_dir, previous_output, parsed.record.date, parsed.record.title
+                )
+            elif previous_output:
+                output_path = output_dir / previous_output
+            else:
                 output_path = unique_output_path(output_dir, parsed.record.date, parsed.record.title)
             if not dry_run:
                 output_path.write_text(render_markdown(parsed.record), encoding="utf-8")

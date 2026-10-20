@@ -8,7 +8,7 @@ from typing import Any, NamedTuple
 
 from ..markdown import render_markdown
 from ..models import MessageTurn, SessionRecord
-from ..utils import parse_iso_timestamp, should_skip_session, unique_output_path
+from ..utils import parse_iso_timestamp, resolve_output_path, should_skip_session, to_local_date, unique_output_path
 
 
 DEFAULT_CODEX_SESSION_DIRS = (
@@ -102,7 +102,7 @@ def parse_codex_session_file(file_path: Path, titles: dict[str, str]) -> ParsedC
                 event_ts_ms = int(timestamp.timestamp() * 1000)
                 latest_timestamp_ms = max(latest_timestamp_ms, event_ts_ms)
                 if started_at is None:
-                    started_at = timestamp.date()
+                    started_at = to_local_date(timestamp)
 
             event_type = event.get("type")
             payload = event.get("payload") or {}
@@ -239,7 +239,7 @@ def export_codex(
         previous = session_state.get(parsed.record.session_id, {})
         previous_timestamp = int(previous.get("latest_timestamp", 0))
         previous_output = str(previous.get("output_file") or "")
-        output_path = output_dir / previous_output if previous_output else None
+        output_path = output_dir / Path(previous_output).name if previous_output else None
         output_exists = output_path is not None and output_path.is_file()
         if not full and parsed.latest_timestamp_ms <= previous_timestamp and output_exists:
             if not dry_run:
@@ -247,7 +247,11 @@ def export_codex(
                 session_state[parsed.record.session_id] = previous
             continue
 
-        if output_path is None:
+        if previous_output and not dry_run:
+            output_path = resolve_output_path(
+                output_dir, previous_output, parsed.record.date, parsed.record.title
+            )
+        elif output_path is None:
             output_path = unique_output_path(output_dir, parsed.record.date, parsed.record.title)
         if not dry_run:
             output_path.write_text(render_markdown(parsed.record), encoding="utf-8")

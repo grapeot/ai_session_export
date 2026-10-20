@@ -1,5 +1,12 @@
 ## Changelog
 
+### 2026-10-19
+
+- Fixed session dates being filed one day ahead when a UTC timestamp falls after the local evening boundary. Per-turn headers render local `HH:MM`, but Antigravity, Claude Code, Codex, Gemini, and Grok derived the frontmatter `date` from the timestamp's own timezone (usually UTC). An Antigravity turn at `2026-10-19T00:14:11Z` is `2026-10-18 17:14 PDT`; the archive said `2026-10-19`, so eink_diary pulled yesterday's work into today's 16:00–18:00 window. Date derivation now uses local time across all adapters: aware timestamps go through `to_local_date()`, while OpenCode, Cursor, Cursor CLI, and DSH already used local `ms_to_date()`.
+- Added `resolve_output_path()` and wired it into Antigravity, Claude Code, Codex, Gemini, and Grok, so a re-export renames an existing archive whose filename date prefix no longer matches the corrected frontmatter date.
+- Historical archives do not self-heal: incremental state skips unchanged transcripts. After deploying this fix, run each affected source once with `--full` (or the whole archive once with `--full`). Added the same caveat to `README.md` and `skill.md`.
+- Added regressions for local-date conversion, stale filename rename, and an evening-UTC Antigravity transcript under `TZ=America/Los_Angeles`. The test suite now pins `TZ=UTC` via `tests/conftest.py` so it is host-independent.
+
 ### 2026-10-17
 
 - Added the Cursor CLI (`cursor agent`) source adapter (`src/ai_session_export/sources/cursor_cli.py`), registered in `sources/__init__.py`, `cli.py` (`--source cursor-cli`, `--cursor-cli-dir`, included in `all`), and `state.py` (`DEFAULT_STATE["cursor_cli"]`). It is a separate source from the Cursor IDE adapter: the storage formats share nothing and the session id namespaces are disjoint. Frontmatter, result dict, state key, and output directory use `cursor_cli`, matching the repo's underscore convention for everything except CLI choices. Added `cursor_cli/` to `.gitignore`.
