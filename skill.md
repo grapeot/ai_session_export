@@ -63,12 +63,24 @@ python export_sessions.py --dsh-sessions-dir /path/to/.dsh/sessions
 python export_sessions.py --gemini-dir /path/to/.gemini/tmp
 python export_sessions.py --grok-sessions-dir /path/to/.grok/sessions
 
+# Inspect, parse, archive, or unarchive native Antigravity sessions
+python export_sessions.py --antigravity-list --antigravity-status all --json
+python export_sessions.py --antigravity-list --antigravity-status archived --antigravity-surface 2
+python export_sessions.py --antigravity-parse <session_id>
+python export_sessions.py --antigravity-parse <session_id> --include-thinking --include-tool-calls --json
+python export_sessions.py --antigravity-archive <session_id> --dry-run --json
+python export_sessions.py --antigravity-archive <session_id> --json
+python export_sessions.py --antigravity-unarchive <session_id> --json
+
 # Messages recovered from a Claude Code cloud transcript (see recovery section)
 python export_sessions.py --source claude-code --claude-backfill-dir /path/to/backfill
 ```
 
 The Antigravity source scans 2.0, IDE, and CLI by default. `--antigravity-dir`
 retains the legacy single-root override and treats that root as IDE-compatible.
+When the sibling `conversation_summaries.db` and `annotations/` directory exist
+in the surface root (`brain/..`), the adapter automatically enriches exported
+sessions with their native Antigravity title and `project_directory`.
 
 The Cursor CLI source (`--source cursor-cli`, frontmatter `source: cursor_cli`)
 is separate from the Cursor IDE source and is part of `all`. It orders turns by
@@ -196,9 +208,9 @@ whenever its backfill file changes, even if the local transcript did not.
 | OpenCode | `~/.local/share/opencode/opencode.db` | SQLite |
 | Claude Code | `~/.claude/projects/**/*.jsonl` | JSONL |
 | Codex | `~/.codex/sessions/**/*.jsonl`, `~/.codex/archived_sessions/*.jsonl` | JSONL |
-| Antigravity 2.0 | `~/.gemini/antigravity/brain/*/.system_generated/logs/transcript_full.jsonl` | JSONL |
-| Antigravity IDE | `~/.gemini/antigravity-ide/brain/*/.system_generated/logs/transcript_full.jsonl` | JSONL |
-| Antigravity CLI | `~/.gemini/antigravity-cli/brain/*/.system_generated/logs/transcript_full.jsonl` | JSONL |
+| Antigravity 2.0 | `~/.gemini/antigravity/brain/*/.system_generated/logs/transcript_full.jsonl` (+ `conversation_summaries.db`, `annotations/*.pbtxt`) | JSONL + SQLite + Protobuf |
+| Antigravity IDE | `~/.gemini/antigravity-ide/brain/*/.system_generated/logs/transcript_full.jsonl` (+ `conversation_summaries.db`, `annotations/*.pbtxt`) | JSONL + SQLite + Protobuf |
+| Antigravity CLI | `~/.gemini/antigravity-cli/brain/*/.system_generated/logs/transcript_full.jsonl` (+ `conversation_summaries.db`, `annotations/*.pbtxt`) | JSONL + SQLite + Protobuf |
 | Cursor | `~/Library/Application Support/Cursor/User/globalStorage/state.vscdb` | SQLite |
 | Cursor CLI | `~/.cursor/chats/*/*/store.db` + `meta.json` | SQLite (content-addressed blobs, protobuf root snapshots) + JSON |
 | DeepSeek Harness | `~/.dsh/sessions/*/*/session[.vN].jsonl[.zstd]` | JSONL or Zstandard; select the newest generation per session directory (currently V4) |
@@ -208,6 +220,48 @@ whenever its backfill file changes, even if the local transcript did not.
 
 Second Mind is opt-in: it is excluded from the default `all` run and only
 exports with an explicit `--source second-mind`.
+
+## Antigravity Native Session Inspection, Parsing, and Archiving
+
+Archiving a session in the Antigravity UI does not move or delete its
+`brain/<session_id>/.system_generated/logs/transcript_full.jsonl` file. Instead,
+Antigravity records the session's metadata and `archived` state across three
+sibling stores in each surface root (`~/.gemini/antigravity{,-ide,-cli}/`):
+
+1. `annotations/<session_id>.pbtxt`: text-format `ConversationAnnotations`
+   protobuf carrying `title:"..."`, `archived:true` (or `archived:false`),
+   `archival_status_timestamp:{seconds:... nanos:...}`, and
+   `last_user_view_time:{seconds:... nanos:...}`.
+2. `conversation_summaries.db` (SQLite):
+   - `conversations_fts` (FTS5 virtual table): the header row with
+     `chunk_index = -1` holds `title`, `workspace`, `last_modified_time`,
+     `step_count`, and `archived` (`0` or `1`). Content chunks (`chunk_index >= 0`)
+     always carry `archived = 0`.
+   - `conversation_summaries`: holds `title`, `workspace_uris`,
+     `parent_conversation_id` (non-empty for subagents), and `raw_summary` (binary
+     `CascadeTrajectorySummary` protobuf where field 1 is `summary`, field 9 is
+     `workspaces`, and field 15 is `ConversationAnnotations` with field 4 = `archived`
+     and field 5 = `archival_status_timestamp`).
+3. `agyhub_summaries_proto.pb` (optional hub cache): repeated field-1 map entries
+   of `{1: session_id, 2: raw_summary}`.
+
+Use the built-in CLI flags to list, parse, archive, or unarchive sessions:
+
+- **List sessions**:
+  `python export_sessions.py --antigravity-list [--antigravity-status {all,active,archived}] [--antigravity-surface {all,2,ide,cli}] [--antigravity-query <text>] [--include-subagents] [--json]`
+- **Parse a single session (active or archived)**:
+  `python export_sessions.py --antigravity-parse <session_id> [--include-thinking] [--include-tool-calls] [--json]`
+  Without `--json`, prints the rendered Markdown transcript (including the
+  enriched native title and `project_directory`). With `--json`, returns metadata,
+  messages, rendered Markdown, and optional `steps` containing `thinking` and
+  `tool_calls`.
+- **Archive or unarchive sessions**:
+  `python export_sessions.py --antigravity-archive <session_id> [<session_id> ...] [--dry-run] [--json]`
+  `python export_sessions.py --antigravity-unarchive <session_id> [<session_id> ...] [--dry-run] [--json]`
+  Updates `annotations/<session_id>.pbtxt`, `conversation_summaries.db`
+  (`conversations_fts` header row and `conversation_summaries.raw_summary`), and
+  `agyhub_summaries_proto.pb` (when present), then verifies the readback state
+  and reports `status: "verified"` (or `"dry_run"`).
 
 ## Adding a New Source
 
