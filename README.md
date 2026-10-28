@@ -61,6 +61,24 @@ repository.
 the `antigravity/` output directory and `source: antigravity`, while optional
 frontmatter `surface` identifies `"2"`, `"ide"`, or `"cli"`. The legacy
 `--antigravity-dir /path/to/brain` override scans one IDE-compatible root.
+When the surface root (`brain/..`) contains `conversation_summaries.db` or
+`annotations/*.pbtxt`, exported sessions are enriched with their native
+Antigravity title and `project_directory`. You can also inspect, parse, archive,
+or unarchive Antigravity sessions directly:
+
+```bash
+# List active or archived Antigravity sessions
+python export_sessions.py --antigravity-list --antigravity-status archived --json
+
+# Parse a single active or archived session (with optional thinking and tool_calls)
+python export_sessions.py --antigravity-parse <session_id>
+python export_sessions.py --antigravity-parse <session_id> --include-thinking --include-tool-calls --json
+
+# Archive or unarchive sessions across native annotations, SQLite, and hub proto
+python export_sessions.py --antigravity-archive <session_id> --dry-run --json
+python export_sessions.py --antigravity-archive <session_id> --json
+python export_sessions.py --antigravity-unarchive <session_id> --json
+```
 
 The DeepSeek Harness source reads the newest immutable generation in each
 session directory (`session.jsonl` for version 0, `session.vN.jsonl` for later

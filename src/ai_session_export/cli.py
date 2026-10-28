@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from collections.abc import Mapping
 from datetime import date
@@ -16,7 +17,11 @@ from .sources import (
     export_dsh,
     export_opencode,
     export_second_mind,
+    list_antigravity_sessions,
+    parse_antigravity_session,
+    set_antigravity_archived,
 )
+from .sources.antigravity import DEFAULT_ANTIGRAVITY_BRAIN_DIRS, MalformedTranscriptError
 from .sources.claude_code import DEFAULT_CLAUDE_HISTORY_FILES, DEFAULT_CLAUDE_PROJECT_DIRS
 from .sources.codex import DEFAULT_CODEX_SESSION_DIRS, DEFAULT_CODEX_SESSION_INDEX
 from .sources.cursor import DEFAULT_CURSOR_DB
@@ -34,6 +39,8 @@ STATE_FILE = BASE_DIR / ".export_state.json"
 DEFAULT_OPENCODE_DB = Path.home() / ".local" / "share" / "opencode" / "opencode.db"
 
 SOURCE_CHOICES = ["all", "second-mind", "opencode", "claude-code", "antigravity", "codex", "cursor", "cursor-cli", "dsh", "gemini", "grok"]
+ANTIGRAVITY_SURFACE_CHOICES = ["all", "2", "ide", "cli"]
+ANTIGRAVITY_STATUS_CHOICES = ["all", "active", "archived"]
 
 
 def run_export(
@@ -190,6 +197,66 @@ def parse_args() -> argparse.Namespace:
         help="Override all default Antigravity surfaces with one IDE-compatible brain directory.",
     )
     parser.add_argument(
+        "--antigravity-surface",
+        choices=ANTIGRAVITY_SURFACE_CHOICES,
+        default="all",
+        help="Restrict Antigravity inspection or archive operations to a specific surface.",
+    )
+    parser.add_argument(
+        "--antigravity-list",
+        action="store_true",
+        help="List Antigravity sessions with native metadata and archived state.",
+    )
+    parser.add_argument(
+        "--antigravity-status",
+        choices=ANTIGRAVITY_STATUS_CHOICES,
+        default="all",
+        help="Filter --antigravity-list by archived state (all, active, archived).",
+    )
+    parser.add_argument(
+        "--antigravity-query",
+        type=str,
+        help="Substring filter on session_id, title, or project_directory for --antigravity-list.",
+    )
+    parser.add_argument(
+        "--include-subagents",
+        action="store_true",
+        help="Include child subagent sessions in --antigravity-list.",
+    )
+    parser.add_argument(
+        "--antigravity-parse",
+        type=str,
+        metavar="SESSION_ID",
+        help="Parse and display a single Antigravity session (active or archived) by session ID.",
+    )
+    parser.add_argument(
+        "--include-thinking",
+        action="store_true",
+        help="Include model thinking steps when running --antigravity-parse --json.",
+    )
+    parser.add_argument(
+        "--include-tool-calls",
+        action="store_true",
+        help="Include model tool_calls when running --antigravity-parse --json.",
+    )
+    parser.add_argument(
+        "--antigravity-archive",
+        nargs="+",
+        metavar="SESSION_ID",
+        help="Mark one or more Antigravity sessions as archived in native storage.",
+    )
+    parser.add_argument(
+        "--antigravity-unarchive",
+        nargs="+",
+        metavar="SESSION_ID",
+        help="Mark one or more Antigravity sessions as unarchived (active) in native storage.",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit JSON output for Antigravity list/parse/archive/unarchive operations.",
+    )
+    parser.add_argument(
         "--codex-dir",
         type=Path,
         action="append",
@@ -227,8 +294,100 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _resolve_cli_antigravity_roots(
+    args: argparse.Namespace,
+) -> tuple[Path | None, Mapping[str, Path] | None]:
+    if args.antigravity_dir is not None:
+        return args.antigravity_dir, None
+    surface = getattr(args, "antigravity_surface", "all")
+    if surface and surface != "all":
+        return None, {surface: DEFAULT_ANTIGRAVITY_BRAIN_DIRS[surface]}
+    return None, None
+
+
+def _handle_antigravity_action(args: argparse.Namespace) -> int | None:
+    list_requested = bool(getattr(args, "antigravity_list", False))
+    parse_id = getattr(args, "antigravity_parse", None)
+    archive_ids = getattr(args, "antigravity_archive", None)
+    unarchive_ids = getattr(args, "antigravity_unarchive", None)
+
+    requested_actions = sum(
+        1 for flag in (list_requested, bool(parse_id), bool(archive_ids), bool(unarchive_ids)) if flag
+    )
+    if requested_actions == 0:
+        return None
+    if requested_actions > 1:
+        print(
+            "[antigravity] --antigravity-list, --antigravity-parse, --antigravity-archive, "
+            "and --antigravity-unarchive are mutually exclusive",
+            file=sys.stderr,
+        )
+        return 2
+
+    brain_dir, brain_dirs = _resolve_cli_antigravity_roots(args)
+    if list_requested:
+        sessions = list_antigravity_sessions(
+            brain_dir=brain_dir,
+            brain_dirs=brain_dirs,
+            status=getattr(args, "antigravity_status", "all"),
+            query=getattr(args, "antigravity_query", None),
+            include_subagents=getattr(args, "include_subagents", False),
+        )
+        if getattr(args, "json", False):
+            print(json.dumps({"sessions": sessions, "count": len(sessions)}, ensure_ascii=False, indent=2))
+        else:
+            for item in sessions:
+                state_tag = "archived" if item["archived"] else "active"
+                title = item["title"] or "(untitled)"
+                print(f"{item['session_id']}\t{item['surface']}\t{state_tag}\t{title}")
+        return 0
+
+    if parse_id:
+        try:
+            parsed = parse_antigravity_session(
+                parse_id,
+                brain_dir=brain_dir,
+                brain_dirs=brain_dirs,
+                include_thinking=getattr(args, "include_thinking", False),
+                include_tool_calls=getattr(args, "include_tool_calls", False),
+            )
+        except (FileNotFoundError, MalformedTranscriptError, ValueError) as exc:
+            print(f"[antigravity] {exc}", file=sys.stderr)
+            return 1
+        if getattr(args, "json", False):
+            print(json.dumps(parsed, ensure_ascii=False, indent=2))
+        else:
+            print(parsed["markdown"], end="")
+        return 0
+
+    target_ids = archive_ids if archive_ids else unarchive_ids
+    target_archived = bool(archive_ids)
+    outcomes = set_antigravity_archived(
+        target_ids,
+        archived=target_archived,
+        brain_dir=brain_dir,
+        brain_dirs=brain_dirs,
+        dry_run=args.dry_run,
+    )
+    if getattr(args, "json", False):
+        print(json.dumps({"results": outcomes}, ensure_ascii=False, indent=2))
+    else:
+        for item in outcomes:
+            print(
+                f"[antigravity] {item['session_id']}: status={item['status']} archived={item['archived']}"
+            )
+    failed = any(item["status"] not in {"verified", "dry_run"} for item in outcomes)
+    return 1 if failed else 0
+
+
 def main() -> None:
     args = parse_args()
+    action_code = _handle_antigravity_action(args)
+    if action_code is not None:
+        if action_code != 0:
+            raise SystemExit(action_code)
+        return
+
     results = run_export(
         args.source,
         full=args.full,

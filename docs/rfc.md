@@ -130,7 +130,8 @@ The adapter runs a `re.DOTALL` capture of `<USER_REQUEST>(.*?)</USER_REQUEST>`, 
 
 Other adapter decisions:
 
-- The session title is the first line of the first kept user message, truncated to 120 characters.
+- When `annotations/<session_id>.pbtxt` or `conversation_summaries.db` (`conversation_summaries` and `conversations_fts` tables) is present in the surface root (`brain_dir.parent`), the adapter reads the native session title (from `.pbtxt` `title`, `conversations_fts` header row `chunk_index = -1`, `conversation_summaries.title`, or field 1 `summary` of `raw_summary` `CascadeTrajectorySummary` protobuf) and `project_directory` (from `workspace_uris`, `conversations_fts.workspace`, or field 9 `workspaces` of `raw_summary`). When no native title exists, it falls back to the first line of the first kept user message, truncated to 120 characters.
+- Native Antigravity archiving does not move `transcript_full.jsonl`. Instead, it records `archived` across `annotations/<session_id>.pbtxt` (`archived:true|false` + `archival_status_timestamp`), `conversations_fts` (`WHERE chunk_index = -1`), `conversation_summaries.raw_summary` (field 15 `ConversationAnnotations` -> field 4 `archived` + field 5 `archival_status_timestamp`), and `agyhub_summaries_proto.pb`. `list_antigravity_sessions`, `parse_antigravity_session`, and `set_antigravity_archived` expose read/write lifecycle operations across all stores with readback verification.
 - `models_used` is always an empty list for Antigravity — model identity is not surfaced in the transcript steps.
 - The session `date` is the calendar date of the earliest step that has a parseable `created_at`, in the exporter host's local timezone. Per-turn `[HH:MM]` headers use the same local basis.
 - A session with no kept messages, a zero `latest_timestamp_ms`, or no `started_at` is skipped entirely.
