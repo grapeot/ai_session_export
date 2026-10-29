@@ -44,9 +44,11 @@ from ai_session_export.sources.opencode import export_opencode
 from ai_session_export.sources.second_mind import export_second_mind
 from ai_session_export.state import DEFAULT_STATE, load_state, save_state
 from ai_session_export.utils import (
+    archived_session_id,
     ms_to_date,
     resolve_output_path,
     sanitize_filename,
+    session_aware_output_path,
     should_skip_session,
     to_local_date,
     unique_output_path,
@@ -761,6 +763,715 @@ def test_opencode_export_with_fixture(tmp_path: Path) -> None:
     assert 'project_directory: "/home/user/project"' in text
     assert "fixture/model" in text  # surfaced in models_used
     assert 'turn_models: ["fixture/model", "fixture/model"]' in text
+
+
+def _append_opencode_turn(db_path: Path, session_id: str, msg_id: str, role: str, text: str, msg_ts: int) -> None:
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        "INSERT INTO message (id, session_id, time_created, data) VALUES (?,?,?,?)",
+        (msg_id, session_id, msg_ts, json.dumps({"role": role})),
+    )
+    conn.execute(
+        "INSERT INTO part (id, message_id, session_id, time_created, data) VALUES (?,?,?,?,?)",
+        (f"{msg_id}_p0", msg_id, session_id, msg_ts, json.dumps({"type": "text", "text": text})),
+    )
+    conn.commit()
+    conn.close()
+
+
+def test_opencode_continued_session_overwrites_same_file(tmp_path: Path) -> None:
+    db_path = tmp_path / "opencode.db"
+    _seed_opencode_db(db_path)
+    out = tmp_path / "out"
+
+    state = {"opencode": {"last_session_time": 0}}
+    kwargs = dict(db_path=db_path, full=True, dry_run=False, since_date=None)
+    first = export_opencode(out, state, **kwargs)
+    assert first["exported"] == 1
+    files = list(out.glob("*.md"))
+    assert len(files) == 1
+
+    _append_opencode_turn(
+        db_path,
+        "ses_fixture",
+        "ses_fixture_m_extra",
+        "user",
+        "one more turn",
+        int(datetime(2026, 6, 29, 9, 20).timestamp() * 1000),
+    )
+    updated = export_opencode(out, {"opencode": {}}, **kwargs)
+    assert updated["exported"] == 1
+    assert updated["overwritten"] == 1
+    # overwrite must happen in place: no _2 duplicate is created
+    assert list(out.glob("*.md")) == files
+    content = files[0].read_text(encoding="utf-8")
+    assert "message_count: 3" in content
+    assert "one more turn" in content
+
+
+def test_opencode_incremental_selection_uses_message_time(tmp_path: Path) -> None:
+    db_path = tmp_path / "opencode.db"
+    _seed_opencode_db(db_path)
+    out = tmp_path / "out"
+
+    state = {"opencode": {"sessions": {}}}
+    export_opencode(out, state, db_path=db_path, full=True, dry_run=False, since_date=None)
+    entry = state["opencode"]["sessions"]["ses_fixture"]
+    assert entry["watermark"] > 0
+    assert "last_message_time" not in state["opencode"]
+
+    # The session was created long before this turn but kept growing; the
+    # per-session watermark must pick it up again and overwrite the existing
+    # archive file instead of creating _2.
+    _append_opencode_turn(
+        db_path,
+        "ses_fixture",
+        "ses_fixture_m_late",
+        "user",
+        "grew after cutoff",
+        entry["watermark"] + 20_000,
+    )
+    result = export_opencode(out, state, db_path=db_path, full=False, dry_run=False, since_date=None)
+    assert result["exported"] == 1
+    assert result["overwritten"] == 1
+    assert len(list(out.glob("*.md"))) == 1
+    assert "grew after cutoff" in list(out.glob("*.md"))[0].read_text(encoding="utf-8")
+    assert state["opencode"]["sessions"]["ses_fixture"]["watermark"] > entry["watermark"]
+
+    # An interim global-cursor state shape (last_message_time + output_file
+    # entries) is migrated once: the cursor becomes each entry's watermark and
+    # the key disappears. Dry-run keeps the adopted value in memory (a real
+    # run after it re-renders hot sessions and rewrites watermarks from
+    # activity).
+    interim_state = {
+        "opencode": {
+            "last_message_time": entry["watermark"] + 5_000,
+            "sessions": {"ses_fixture": {"output_file": "20260629_Fixture_OpenCode_Session.md"}},
+        }
+    }
+    export_opencode(out, interim_state, db_path=db_path, full=True, dry_run=True, since_date=None)
+    assert "last_message_time" not in interim_state["opencode"]
+    assert interim_state["opencode"]["sessions"]["ses_fixture"] == {
+        "watermark": entry["watermark"] + 5_000,
+        "output_file": "20260629_Fixture_OpenCode_Session.md",
+    }
+
+
+def test_opencode_same_title_sessions_keep_separate_files(tmp_path: Path) -> None:
+    db_path = tmp_path / "opencode.db"
+    _seed_opencode_db(db_path)
+    retried_time = int(datetime(2026, 6, 29, 10, 0).timestamp() * 1000)
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        "INSERT INTO session (id, title, directory, time_created) VALUES (?,?,?,?)",
+        ("ses_fixture_b", "Fixture OpenCode Session", "/home/user/project", retried_time),
+    )
+    conn.commit()
+    conn.close()
+    _append_opencode_turn(db_path, "ses_fixture_b", "ses_fixture_b_m0", "user", "Retried fixture session", retried_time)
+
+    out = tmp_path / "out"
+    result = export_opencode(out, {"opencode": {}}, db_path=db_path, full=True, dry_run=False, since_date=None)
+    assert result["exported"] == 2
+    assert result["overwritten"] == 0
+    files = sorted(f.name for f in out.glob("*.md"))
+    assert files == ["20260629_Fixture_OpenCode_Session.md", "20260629_Fixture_OpenCode_Session_2.md"]
+
+
+def test_opencode_reemit_keeps_collision_numbering(tmp_path: Path) -> None:
+    db_path = tmp_path / "opencode.db"
+    _seed_opencode_db(db_path)
+    retried_time = int(datetime(2026, 6, 29, 10, 0).timestamp() * 1000)
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        "INSERT INTO session (id, title, directory, time_created) VALUES (?,?,?,?)",
+        ("ses_fixture_b", "Fixture OpenCode Session", "/home/user/project", retried_time),
+    )
+    conn.commit()
+    conn.close()
+    _append_opencode_turn(db_path, "ses_fixture_b", "ses_fixture_b_m0", "user", "Retried fixture session", retried_time)
+
+    out = tmp_path / "out"
+    export_opencode(out, {"opencode": {}}, db_path=db_path, full=True, dry_run=False, since_date=None)
+    assert len(list(out.glob("*.md"))) == 2
+
+    _append_opencode_turn(
+        db_path,
+        "ses_fixture",
+        "ses_fixture_m_extra",
+        "user",
+        "one more turn",
+        int(datetime(2026, 6, 29, 9, 20).timestamp() * 1000),
+    )
+    result = export_opencode(out, {"opencode": {}}, db_path=db_path, full=True, dry_run=False, since_date=None)
+    assert result["exported"] == 2
+    assert result["overwritten"] == 1
+    names = sorted(f.name for f in out.glob("*.md"))
+    assert names == ["20260629_Fixture_OpenCode_Session.md", "20260629_Fixture_OpenCode_Session_2.md"]
+
+
+def test_opencode_shrink_guard_keeps_bigger_archive(tmp_path: Path) -> None:
+    db_path = tmp_path / "opencode.db"
+    _seed_opencode_db(db_path)
+    out = tmp_path / "out"
+    export_opencode(out, {"opencode": {}}, db_path=db_path, full=True, dry_run=False, since_date=None)
+
+    archive = out / "20260629_Fixture_OpenCode_Session.md"
+    padded = archive.read_text(encoding="utf-8") + "\n<!-- historical tail that the source lost -->\n"
+    archive.write_text(padded, encoding="utf-8")
+    before = archive.read_text(encoding="utf-8")
+
+    result = export_opencode(out, {"opencode": {}}, db_path=db_path, full=True, dry_run=False, since_date=None)
+    assert result["skipped_shrunk"] == 1
+    assert result["exported"] == 1
+    assert archive.read_text(encoding="utf-8") == before
+
+
+def test_session_aware_output_path_matches_by_session_id(tmp_path: Path) -> None:
+    record = SessionRecord(
+        source="opencode",
+        session_id="ses_one",
+        title="Fixture Opencode Session",
+        date="2026-06-29",
+        messages=[MessageTurn(role="user", content="hello")],
+    )
+    (tmp_path / "20260629_Fixture_Opencode_Session.md").write_text(render_markdown(record), encoding="utf-8")
+
+    same = session_aware_output_path(tmp_path, "ses_one", "2026-06-29", "Fixture Opencode Session")
+    assert same == tmp_path / "20260629_Fixture_Opencode_Session.md"
+
+    other = session_aware_output_path(tmp_path, "ses_two", "2026-06-29", "Fixture Opencode Session")
+    assert other == tmp_path / "20260629_Fixture_Opencode_Session_2.md"
+
+
+def test_archived_session_id_parses_frontmatter(tmp_path: Path) -> None:
+    record = SessionRecord(
+        source="opencode",
+        session_id="ses_probe",
+        title="Probe",
+        date="2026-06-29",
+        messages=[MessageTurn(role="user", content="hello")],
+    )
+    path = tmp_path / "probe.md"
+    path.write_text(render_markdown(record), encoding="utf-8")
+    assert archived_session_id(path) == "ses_probe"
+
+    plain = tmp_path / "plain.md"
+    plain.write_text("no frontmatter here\n", encoding="utf-8")
+    assert archived_session_id(plain) is None
+
+
+def test_archived_session_id_parses_frontmatter_past_fixed_window(tmp_path: Path) -> None:
+    # per-turn turn_models lists grow the frontmatter far beyond any small
+    # fixed window; the id sits near the top and must still parse
+    path = tmp_path / "long.md"
+    path.write_text(
+        "---\n"
+        'source: "opencode"\n'
+        'session_id: "ses_long"\n'
+        'title: "Long session"\n'
+        'date: "2023-11-14"\n'
+        "message_count: 400\n"
+        "models_used: [\"model/x\"]\n"
+        "turn_models: [" + ",".join(f"\"model/turn-{i}\"" for i in range(400)) + "]\n"
+        "---\n\n"
+        "## User [10:00]\n\nbody\n",
+        encoding="utf-8",
+    )
+    assert archived_session_id(path) == "ses_long"
+
+
+def test_session_aware_output_path_never_returns_foreign_existing_file(tmp_path: Path) -> None:
+    for name, owner in (
+        ("20260629_Clash.md", "other"),
+        ("20260629_Clash_2.md", "other2"),
+    ):
+        (tmp_path / name).write_text(_owner_archive(name, owner), encoding="utf-8")
+    # walk exhausted under a tiny cap: nothing claims the session, so the
+    # result must be a guaranteed-new path, never an owned-by-other file
+    resolved = session_aware_output_path(tmp_path, "ses_mine", "2026-06-29", "Clash", max_candidates=2)
+    assert resolved == tmp_path / "20260629_Clash_3.md"
+    assert not resolved.exists()
+
+
+def _owner_archive(name: str, owner: str) -> str:
+    return (
+        "---\n"
+        'source: "opencode"\n'
+        f'session_id: "{owner}"\n'
+        f'title: "{name}"\n'
+        'date: "2026-06-29"\n'
+        "message_count: 1\n"
+        "---\n\n"
+        "## User [10:00]\n\nbody\n"
+    )
+
+
+def test_opencode_dry_run_writes_nothing(tmp_path: Path) -> None:
+    db_path = tmp_path / "opencode.db"
+    _seed_opencode_db(db_path)
+    out = tmp_path / "out"
+
+    planned = export_opencode(out, {"opencode": {}}, db_path=db_path, full=False, dry_run=True, since_date=None)
+    assert planned["exported"] == 1
+    assert not list(out.glob("*.md"))
+
+    export_opencode(out, {"opencode": {}}, db_path=db_path, full=True, dry_run=False, since_date=None)
+    archive = list(out.glob("*.md"))[0]
+    mtime = archive.stat().st_mtime_ns
+    content = archive.read_text(encoding="utf-8")
+
+    replanned = export_opencode(out, {"opencode": {}}, db_path=db_path, full=True, dry_run=True, since_date=None)
+    assert replanned["exported"] == 1
+    assert not replanned.get("overwritten")
+    assert archive.stat().st_mtime_ns == mtime
+    assert archive.read_text(encoding="utf-8") == content
+
+
+def test_opencode_since_date_does_not_burn_cursor(tmp_path: Path) -> None:
+    db_path = tmp_path / "opencode.db"
+    _seed_opencode_db(db_path)
+    # an old session (older filename date) whose message lands later than the
+    # fresh session's last turn
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        "INSERT INTO session (id, title, directory, time_created) VALUES (?,?,?,?)",
+        ("ses_old", "Old Session", "/home/user/project", int(datetime(2026, 6, 20).timestamp() * 1000)),
+    )
+    conn.commit()
+    conn.close()
+    _append_opencode_turn(
+        db_path,
+        "ses_old",
+        "ses_old_m0",
+        "user",
+        "late turn for old session",
+        int(datetime(2026, 6, 29, 10, 0).timestamp() * 1000),
+    )
+    out = tmp_path / "out"
+    state = {"opencode": {}}
+    filtered = export_opencode(out, state, db_path=db_path, full=False, dry_run=False, since_date=date(2026, 6, 29))
+    # ses_old is skipped by --since-date; its message time must not advance
+    # the cursor (the "sessions" carry the fresh session only)
+    assert list(out.glob("*.md")) == [out / "20260629_Fixture_OpenCode_Session.md"]
+    assert not filtered.get("overwritten")
+
+    followup = export_opencode(out, state, db_path=db_path, full=False, dry_run=False, since_date=None)
+    assert followup["exported"] == 1
+    assert (out / "20260620_Old_Session.md").exists()
+    assert "late turn for old session" in (out / "20260620_Old_Session.md").read_text(encoding="utf-8")
+
+
+def test_opencode_partial_user_message_does_not_burn_cursor(tmp_path: Path) -> None:
+    db_path = tmp_path / "opencode.db"
+    _seed_opencode_db(db_path)
+    out = tmp_path / "out"
+    state = {"opencode": {}}
+    export_opencode(out, state, db_path=db_path, full=True, dry_run=False, since_date=None)
+    archive = out / "20260629_Fixture_OpenCode_Session.md"
+    mtime = archive.stat().st_mtime_ns
+
+    # a user message row lands with no text part yet (text still streaming in)
+    streamed_ts = int(datetime(2026, 6, 29, 9, 30).timestamp() * 1000)
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        "INSERT INTO message (id, session_id, time_created, data) VALUES (?,?,?,?)",
+        ("ses_fixture_m_stream", "ses_fixture", streamed_ts, json.dumps({"role": "user"})),
+    )
+    conn.commit()
+    conn.close()
+
+    first = export_opencode(out, {"opencode": {}}, db_path=db_path, full=False, dry_run=False, since_date=None)
+    # nothing new is rendered, and the cursor must stop below the pending row
+    assert first["exported"] == 1
+    assert first["overwritten"] == 0
+    assert archive.stat().st_mtime_ns == mtime
+
+    # text part commits at the same message timestamp: the session must be
+    # re-rendered and the existing file overwritten in place
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        "INSERT INTO part (id, message_id, session_id, time_created, data) VALUES (?,?,?,?,?)",
+        (
+            "ses_fixture_m_stream_p0",
+            "ses_fixture_m_stream",
+            "ses_fixture",
+            streamed_ts,
+            json.dumps({"type": "text", "text": "text arrives later"}),
+        ),
+    )
+    conn.commit()
+    conn.close()
+    second = export_opencode(out, state, db_path=db_path, full=False, dry_run=False, since_date=None)
+    assert second["overwritten"] == 1
+    assert "text arrives later" in archive.read_text(encoding="utf-8")
+
+
+def test_opencode_part_growth_on_old_message_rerenders(tmp_path: Path) -> None:
+    db_path = tmp_path / "opencode.db"
+    _seed_opencode_db(db_path)
+    out = tmp_path / "out"
+    state = {"opencode": {}}
+    export_opencode(out, state, db_path=db_path, full=True, dry_run=False, since_date=None)
+    archive = out / "20260629_Fixture_OpenCode_Session.md"
+
+    # a new text part on an existing message arrives later than every message
+    conn = sqlite3.connect(str(db_path))
+    part_ts = int(datetime(2026, 6, 29, 23, 0).timestamp() * 1000)
+    conn.execute(
+        "INSERT INTO part (id, message_id, session_id, time_created, data) VALUES (?,?,?,?,?)",
+        (
+            "ses_fixture_m0_p1",
+            "ses_fixture_m0",
+            "ses_fixture",
+            part_ts,
+            json.dumps({"type": "text", "text": " continuation appended to a part"}),
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    result = export_opencode(out, state, db_path=db_path, full=False, dry_run=False, since_date=None)
+    assert result["overwritten"] == 1
+    assert "continuation appended to a part" in archive.read_text(encoding="utf-8")
+    assert state["opencode"]["sessions"]["ses_fixture"]["watermark"] >= part_ts
+
+
+def test_opencode_entry_adopts_archive_after_title_change(tmp_path: Path) -> None:
+    db_path = tmp_path / "opencode.db"
+    _seed_opencode_db(db_path)
+    out = tmp_path / "out"
+    state = {"opencode": {}}
+    export_opencode(out, state, db_path=db_path, full=True, dry_run=False, since_date=None)
+    archive = out / "20260629_Fixture_OpenCode_Session.md"
+    entry = state["opencode"]["sessions"]["ses_fixture"]
+    assert entry["output_file"] == archive.name
+    assert entry["watermark"] > 0
+
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("UPDATE session SET title = ? WHERE id = ?", ("Renamed title", "ses_fixture"))
+    conn.commit()
+    conn.close()
+    _append_opencode_turn(
+        db_path,
+        "ses_fixture",
+        "ses_fixture_m_extra",
+        "user",
+        "one more turn",
+        int(datetime(2026, 6, 29, 9, 20).timestamp() * 1000),
+    )
+
+    followup = export_opencode(out, state, db_path=db_path, full=False, dry_run=False, since_date=None)
+    assert followup["overwritten"] == 1
+    # the renamed session keeps writing to its existing archive file; the
+    # stale-title filename stays in place (no second copy is created)
+    assert sorted(f.name for f in out.glob("*.md")) == [archive.name]
+    assert "one more turn" in archive.read_text(encoding="utf-8")
+
+
+def test_cli_summary_reports_overwrite_counts(tmp_path: Path, capsys, monkeypatch) -> None:
+    db_path = tmp_path / "opencode.db"
+    _seed_opencode_db(db_path)
+    base_dir = tmp_path / "out"
+    state_file = tmp_path / ".export_state.json"
+    argv = [
+        "export_sessions.py",
+        "--source",
+        "opencode",
+        "--base-dir",
+        str(base_dir),
+        "--state-file",
+        str(state_file),
+        "--opencode-db",
+        str(db_path),
+    ]
+    monkeypatch.setattr(sys, "argv", argv)
+    cli_module.main()
+    first = capsys.readouterr().out
+    assert "exported=1" in first
+
+    _append_opencode_turn(
+        db_path,
+        "ses_fixture",
+        "ses_fixture_m_extra",
+        "user",
+        "one more turn",
+        int(datetime(2026, 6, 29, 9, 20).timestamp() * 1000),
+    )
+    monkeypatch.setattr(sys, "argv", argv)
+    cli_module.main()
+    second = capsys.readouterr().out
+    assert "overwritten=1" in second
+    assert "exported=1" in second
+
+
+def test_opencode_cross_session_watermark_no_burn(tmp_path: Path) -> None:
+    db_path = tmp_path / "opencode.db"
+    _seed_opencode_db(db_path)
+    out = tmp_path / "out"
+    state = {"opencode": {}}
+    export_opencode(out, state, db_path=db_path, full=True, dry_run=False, since_date=None)
+
+    t0 = int(datetime(2026, 6, 30).timestamp() * 1000)
+    # session A: a user message row lands with no text part yet
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        "INSERT INTO session (id, title, directory, time_created) VALUES (?,?,?,?)",
+        ("ses_a", "Session A", "/home/user/project", t0),
+    )
+    conn.execute(
+        "INSERT INTO message (id, session_id, time_created, data) VALUES (?,?,?,?)",
+        ("ses_a_m0", "ses_a", t0 + 50_000, json.dumps({"role": "user"})),
+    )
+    # session B: a fully renderable message that completes later than A's
+    conn.execute(
+        "INSERT INTO session (id, title, directory, time_created) VALUES (?,?,?,?)",
+        ("ses_b", "Session B", "/home/user/project", t0 + 10_000),
+    )
+    conn.execute(
+        "INSERT INTO message (id, session_id, time_created, data) VALUES (?,?,?,?)",
+        ("ses_b_m0", "ses_b", t0 + 80_000, json.dumps({"role": "user"})),
+    )
+    conn.execute(
+        "INSERT INTO part (id, message_id, session_id, time_created, data) VALUES (?,?,?,?,?)",
+        (
+            "ses_b_m0_p0",
+            "ses_b_m0",
+            "ses_b",
+            t0 + 80_000,
+            json.dumps({"type": "text", "text": "b's question"}),
+        ),
+    )
+    conn.commit()
+    conn.close()
+    _append_opencode_turn(
+        db_path,
+        "ses_b",
+        "ses_b_m1",
+        "assistant",
+        "b's answer",
+        t0 + 81_000,
+    )
+
+    first = export_opencode(out, state, db_path=db_path, full=False, dry_run=False, since_date=None)
+    # session B completes; session A's pending row must not burn its watermark
+    assert list(out.glob("20260630_Session_B.md"))
+    entry_a = state["opencode"]["sessions"].get("ses_a")
+    assert entry_a is None or entry_a["watermark"] < t0 + 50_000
+
+    # the text part of A's pending message lands at its own timestamp:
+    # the session must re-render and write its turn out
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        "INSERT INTO part (id, message_id, session_id, time_created, data) VALUES (?,?,?,?,?)",
+        (
+            "ses_a_m0_p0",
+            "ses_a_m0",
+            "ses_a",
+            t0 + 50_000,
+            json.dumps({"type": "text", "text": "late user text"}),
+        ),
+    )
+    conn.commit()
+    conn.close()
+    followup = export_opencode(out, state, db_path=db_path, full=False, dry_run=False, since_date=None)
+    assert followup["exported"] >= 1
+    a_file = out / "20260630_Session_A.md"
+    assert a_file.exists()
+    assert "late user text" in a_file.read_text(encoding="utf-8")
+
+def test_opencode_streaming_assistant_message_rerenders(tmp_path: Path) -> None:
+    db_path = tmp_path / "opencode.db"
+    _seed_opencode_db(db_path)
+    t0 = int(datetime(2026, 6, 30).timestamp() * 1000)
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        "INSERT INTO session (id, title, directory, time_created) VALUES (?,?,?,?)",
+        ("ses_c", "Session C", "/home/user/project", t0),
+    )
+    conn.execute(
+        "INSERT INTO message (id, session_id, time_created, data) VALUES (?,?,?,?)",
+        ("ses_c_m0", "ses_c", t0, json.dumps({"role": "user"})),
+    )
+    conn.execute(
+        "INSERT INTO part (id, message_id, session_id, time_created, data) VALUES (?,?,?,?,?)",
+        (
+            "ses_c_m0_p0",
+            "ses_c_m0",
+            "ses_c",
+            t0,
+            json.dumps({"type": "text", "text": "ask question"}),
+        ),
+    )
+    # an assistant message row lands with no part rows at all (text streaming)
+    conn.execute(
+        "INSERT INTO message (id, session_id, time_created, data) VALUES (?,?,?,?)",
+        ("ses_c_m1", "ses_c", t0 + 5_000, json.dumps({"role": "assistant"})),
+    )
+    conn.commit()
+    conn.close()
+
+    out = tmp_path / "out"
+    state = {"opencode": {}}
+    first = export_opencode(out, state, db_path=db_path, full=False, dry_run=False, since_date=None)
+    assert first["exported"] >= 1
+    assert state["opencode"]["sessions"]["ses_c"]["watermark"] < t0 + 5_000
+
+    # the assistant text part commits at the same timestamp: re-render and
+    # overwrite the existing archive in place
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        "INSERT INTO part (id, message_id, session_id, time_created, data) VALUES (?,?,?,?,?)",
+        (
+            "ses_c_m1_p0",
+            "ses_c_m1",
+            "ses_c",
+            t0 + 5_000,
+            json.dumps({"type": "text", "text": "the answer"}),
+        ),
+    )
+    conn.commit()
+    conn.close()
+    followup = export_opencode(out, state, db_path=db_path, full=False, dry_run=False, since_date=None)
+    assert followup["overwritten"] == 1
+    assert "the answer" in (out / "20260630_Session_C.md").read_text(encoding="utf-8")
+
+
+def test_opencode_claim_adopts_archive_without_mapping(tmp_path: Path) -> None:
+    db_path = tmp_path / "opencode.db"
+    _seed_opencode_db(db_path)
+    out = tmp_path / "out"
+    state = {"opencode": {}}
+    export_opencode(out, state, db_path=db_path, full=True, dry_run=False, since_date=None)
+    original = out / "20260629_Fixture_OpenCode_Session.md"
+    assert original.exists()
+
+    # strip the sessions mapping (upgrade-era archives have none) and rename
+    state = {"opencode": {"sessions": {}}}
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("UPDATE session SET title = ? WHERE id = ?", ("Renamed title", "ses_fixture"))
+    conn.commit()
+    conn.close()
+    _append_opencode_turn(
+        db_path,
+        "ses_fixture",
+        "ses_fixture_m_extra",
+        "user",
+        "one more turn",
+        int(datetime(2026, 6, 29, 9, 20).timestamp() * 1000),
+    )
+
+    followup = export_opencode(out, state, db_path=db_path, full=False, dry_run=False, since_date=None)
+    assert followup["overwritten"] == 1
+    # the renamed session re-adopts its existing same-day archive file; no
+    # second copy under the new title is created
+    assert sorted(f.name for f in out.glob("*.md")) == [original.name]
+    assert "one more turn" in original.read_text(encoding="utf-8")
+
+
+def test_opencode_full_reexport_heals_modified_archive(tmp_path: Path) -> None:
+    db_path = tmp_path / "opencode.db"
+    _seed_opencode_db(db_path)
+    out = tmp_path / "out"
+    state = {"opencode": {"sessions": {}}}
+    export_opencode(out, state, db_path=db_path, full=True, dry_run=False, since_date=None)
+    archive = out / "20260629_Fixture_OpenCode_Session.md"
+    watermark = state["opencode"]["sessions"]["ses_fixture"]["watermark"]
+
+    archive.write_text(archive.read_text(encoding="utf-8").replace("pytest is a testing framework", "STALE"), encoding="utf-8")
+
+    # freshness is caught up (activity <= watermark), so an incremental run
+    # skips the session and the stale text stays
+    incremental = export_opencode(out, state, db_path=db_path, full=False, dry_run=False, since_date=None)
+    assert incremental["exported"] == 0
+    assert "STALE" in archive.read_text(encoding="utf-8")
+
+    # --full ignores the watermark comparison: the archive is re-rendered and
+    # overwritten in place
+    healed = export_opencode(out, state, db_path=db_path, full=True, dry_run=False, since_date=None)
+    assert healed["overwritten"] == 1
+    assert "pytest is a testing framework" in archive.read_text(encoding="utf-8")
+    assert state["opencode"]["sessions"]["ses_fixture"]["watermark"] >= watermark
+
+
+def test_opencode_master_state_migration_consumes_legacy_creation_cursor(tmp_path: Path) -> None:
+    db_path = tmp_path / "opencode.db"
+    _seed_opencode_db(db_path)
+    # master-era state: only a creation-time watermark, no per-session entries
+    state = {"opencode": {"last_session_time": 10 ** 13}}
+    out = tmp_path / "out"
+    result = export_opencode(out, state, db_path=db_path, full=False, dry_run=False, since_date=None)
+    # the fixture session's rows are all <= the legacy cursor: consumed
+    assert result["exported"] == 0
+    assert not list(out.glob("*.md"))
+    assert state["opencode"]["sessions"]["ses_fixture"]["watermark"] == 10 ** 13
+    assert "last_session_time" not in state["opencode"]
+
+    _append_opencode_turn(
+        db_path,
+        "ses_fixture",
+        "ses_fixture_m_late",
+        "user",
+        "new turn after the migration",
+        10 ** 13 + 1_000,
+    )
+    followup = export_opencode(out, state, db_path=db_path, full=False, dry_run=False, since_date=None)
+    assert followup["exported"] == 1
+    assert "new turn after the migration" in list(out.glob("*.md"))[0].read_text(encoding="utf-8")
+
+
+def test_opencode_watermark_never_recedes_with_earlier_pending_row(tmp_path: Path) -> None:
+    db_path = tmp_path / "opencode.db"
+    _seed_opencode_db(db_path)
+    out = tmp_path / "out"
+    state = {"opencode": {"sessions": {}}}
+    export_opencode(out, state, db_path=db_path, full=True, dry_run=False, since_date=None)
+    first_watermark = state["opencode"]["sessions"]["ses_fixture"]["watermark"]
+    assert first_watermark > 0
+
+    # an empty user row whose timestamp predates everything, plus a fresh
+    # renderable turn that lands after this run's watermark
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        "INSERT INTO message (id, session_id, time_created, data) VALUES (?,?,?,?)",
+        ("ses_fixture_m_early", "ses_fixture", first_watermark - 10 ** 9, json.dumps({"role": "user"})),
+    )
+    conn.commit()
+    conn.close()
+    _append_opencode_turn(
+        db_path,
+        "ses_fixture",
+        "ses_fixture_m_new",
+        "assistant",
+        "brand new answer",
+        first_watermark + 5_000_000,
+    )
+
+    second = export_opencode(out, state, db_path=db_path, full=False, dry_run=False, since_date=None)
+    assert second["overwritten"] == 1
+    assert "brand new answer" in (out / "20260629_Fixture_OpenCode_Session.md").read_text(encoding="utf-8")
+    # monotonic: the earlier pending row must not drag the watermark back to 0
+    assert state["opencode"]["sessions"]["ses_fixture"]["watermark"] >= first_watermark
+
+    # the empty row's text part commits at its own timestamp: caught by the
+    # hotspot re-render even though that timestamp is below the watermark
+    early_ts = first_watermark - 10 ** 9
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        "INSERT INTO part (id, message_id, session_id, time_created, data) VALUES (?,?,?,?,?)",
+        (
+            "ses_fixture_m_early_p0",
+            "ses_fixture_m_early",
+            "ses_fixture",
+            early_ts,
+            json.dumps({"type": "text", "text": "very late early text"}),
+        ),
+    )
+    conn.commit()
+    conn.close()
+    third = export_opencode(out, state, db_path=db_path, full=False, dry_run=False, since_date=None)
+    assert third["exported"] >= 1
+    assert "very late early text" in (out / "20260629_Fixture_OpenCode_Session.md").read_text(encoding="utf-8")
 
 
 def test_claude_code_export_with_fixture(tmp_path: Path) -> None:
@@ -2431,7 +3142,7 @@ def test_cli_run_export_all_sources(tmp_path: Path) -> None:
     # State file was persisted with refreshed counters.
     persisted = load_state(state_file)
     assert persisted["second_mind"]["last_export_count"] == 0
-    assert persisted["opencode"]["last_session_time"] > 0
+    assert persisted["opencode"]["sessions"]["ses_fixture"]["watermark"] > 0
     assert persisted["claude_code"]["sessions"]["claude-fixture-1"]["latest_timestamp"] > 0
     antigravity_sessions = persisted["antigravity"]["surfaces"]["ide"]["sessions"]
     assert antigravity_sessions["antigravity-session-fixture"]["status"] == "complete"

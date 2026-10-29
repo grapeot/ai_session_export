@@ -30,7 +30,10 @@ archive for browsing, semantic search, and downstream workflows.
 All commands run from the project root.
 
 ```bash
-# Export all default sources (incremental — only new sessions since last run)
+# Export all default sources (incremental — only sessions with new messages
+# since the last run; OpenCode selects by each session's latest message time,
+# so long-lived sessions that keep growing are picked up and their existing
+# archive file is overwritten in place, matched by frontmatter session_id)
 # Second Mind is opt-in and not part of "all".
 python export_sessions.py
 
@@ -44,7 +47,8 @@ python export_sessions.py --source dsh
 python export_sessions.py --source gemini
 python export_sessions.py --source grok
 
-# Full re-export (ignore incremental cursor)
+# Full re-export (render everything, ignoring watermarks; heals restored
+# or modified archives)
 python export_sessions.py --full
 
 # Only sessions from a date onward
@@ -95,7 +99,18 @@ matching session using only the transcript content currently on disk. If the
 session date changed, the archive may be renamed to the corrected date prefix.
 If a source file has since lost history (for example a truncated Claude Code
 transcript, see below), the archive loses it too. Back up the archive or recover
-the missing messages into a backfill file first.
+the missing messages into a backfill file first. The OpenCode adapter keeps a
+per-session watermark and renders sessions whose latest message/part activity
+exceeds it; it carries two guards: when a re-export renders less content than
+the existing archive file holds, the bigger archive file is kept and the write
+is reported as `skipped_shrunk`; and a legacy state (a global message-time
+cursor, or the older creation-time shape) is migrated once on the first run by
+adopting the stored cursor as `default_watermark` (the freshness floor for
+sessions without a per-session entry, also stamped onto probed cold sessions)
+and onto each existing entry's watermark, so the first run
+does not rescan history. A late-arriving text part whose timestamp is <= the
+burned watermark is not picked up incrementally; `--full` heals after bulk
+restores.
 
 ## Output Contract
 
