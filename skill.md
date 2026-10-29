@@ -47,7 +47,8 @@ python export_sessions.py --source dsh
 python export_sessions.py --source gemini
 python export_sessions.py --source grok
 
-# Full re-export (ignore incremental cursor)
+# Full re-export (render everything, ignoring watermarks; heals restored
+# or modified archives)
 python export_sessions.py --full
 
 # Only sessions from a date onward
