@@ -71,13 +71,21 @@ def archived_session_id(path: Path, max_head_bytes: int = 65536) -> str | None:
         return match.group(1).strip().strip('"')
 
 
-def claim_archive_file(output_dir: Path, session_id: str, prefix: str | None = None) -> Path | None:
+def claim_archive_file(
+    output_dir: Path,
+    session_id: str,
+    prefix: str | None = None,
+    *,
+    same_day_only: bool = False,
+) -> Path | None:
     """Find a session's archive file inside ``output_dir`` by frontmatter id.
 
     Used when the stem chain (creation date + current title) holds no match,
     for example after the session was renamed since its first export. Returns
     the file for in-place overwrite, without renaming; None when nothing
-    claims it. Same-day files are probed first.
+    claims it. Same-day files are probed first; ``same_day_only`` restricts
+    the search to them (cheap for new-session creates, and a session's
+    creation date does not change when its title does).
     """
     try:
         candidates = sorted(
@@ -88,10 +96,15 @@ def claim_archive_file(output_dir: Path, session_id: str, prefix: str | None = N
         return None
     if prefix:
         same_day = [item for item in candidates if item.name.startswith(prefix)]
-        others = [item for item in candidates if not item.name.startswith(prefix)]
     else:
-        same_day, others = candidates, []
-    for item in same_day + others:
+        same_day, candidates = candidates, []
+    for item in same_day:
+        if archived_session_id(item) == session_id:
+            return item
+    if same_day_only:
+        return None
+    still_others = [item for item in candidates if not item.name.startswith(prefix or "")]
+    for item in still_others:
         if archived_session_id(item) == session_id:
             return item
     return None
@@ -111,9 +124,10 @@ def session_aware_output_path(
     frontmatter ``session_id``), not create an ``_2`` duplicate. The search
     walks the numbering chain implied by :func:`unique_output_path`; every
     returned path is either a confirmed same-session file or a non-existing
-    create path. If the chain runs out without a match, claim the session's
-    file by its frontmatter id anywhere in the directory, then fall back to
-    the next guaranteed-new number.
+    create path — and before creating, the same-day files are probed so a
+    renamed session claims its existing archive instead of starting a second
+    copy. If the chain runs out without a match, the session's file is claimed
+    anywhere in the directory, then the next guaranteed-new number is used.
     """
     prefix = date_ymd.replace("-", "")
     stem = f"{prefix}_{sanitize_filename(title)}"
@@ -121,6 +135,9 @@ def session_aware_output_path(
     counter = 2
     while counter <= max_candidates:
         if not candidate.exists():
+            claimed = claim_archive_file(output_dir, session_id, prefix=prefix, same_day_only=True)
+            if claimed is not None:
+                return claimed
             return candidate
         if archived_session_id(candidate) == session_id:
             return candidate
