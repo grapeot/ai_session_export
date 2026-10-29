@@ -105,7 +105,9 @@ exceeds it; it carries two guards: when a re-export renders less content than
 the existing archive file holds, the bigger archive file is kept and the write
 is reported as `skipped_shrunk`; and a legacy state (a global message-time
 cursor, or the older creation-time shape) is migrated once on the first run by
-adopting the stored cursor as each existing entry's watermark, so the first run
+adopting the stored cursor as `default_watermark` (the freshness floor for
+sessions without a per-session entry, also stamped onto probed cold sessions)
+and onto each existing entry's watermark, so the first run
 does not rescan history. A late-arriving text part whose timestamp is <= the
 burned watermark is not picked up incrementally; `--full` heals after bulk
 restores.
