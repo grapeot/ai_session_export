@@ -1369,6 +1369,111 @@ def test_opencode_claim_adopts_archive_without_mapping(tmp_path: Path) -> None:
     assert "one more turn" in original.read_text(encoding="utf-8")
 
 
+def test_opencode_full_reexport_heals_modified_archive(tmp_path: Path) -> None:
+    db_path = tmp_path / "opencode.db"
+    _seed_opencode_db(db_path)
+    out = tmp_path / "out"
+    state = {"opencode": {"sessions": {}}}
+    export_opencode(out, state, db_path=db_path, full=True, dry_run=False, since_date=None)
+    archive = out / "20260629_Fixture_OpenCode_Session.md"
+    watermark = state["opencode"]["sessions"]["ses_fixture"]["watermark"]
+
+    archive.write_text(archive.read_text(encoding="utf-8").replace("pytest is a testing framework", "STALE"), encoding="utf-8")
+
+    # freshness is caught up (activity <= watermark), so an incremental run
+    # skips the session and the stale text stays
+    incremental = export_opencode(out, state, db_path=db_path, full=False, dry_run=False, since_date=None)
+    assert incremental["exported"] == 0
+    assert "STALE" in archive.read_text(encoding="utf-8")
+
+    # --full ignores the watermark comparison: the archive is re-rendered and
+    # overwritten in place
+    healed = export_opencode(out, state, db_path=db_path, full=True, dry_run=False, since_date=None)
+    assert healed["overwritten"] == 1
+    assert "pytest is a testing framework" in archive.read_text(encoding="utf-8")
+    assert state["opencode"]["sessions"]["ses_fixture"]["watermark"] >= watermark
+
+
+def test_opencode_master_state_migration_consumes_legacy_creation_cursor(tmp_path: Path) -> None:
+    db_path = tmp_path / "opencode.db"
+    _seed_opencode_db(db_path)
+    # master-era state: only a creation-time watermark, no per-session entries
+    state = {"opencode": {"last_session_time": 10 ** 13}}
+    out = tmp_path / "out"
+    result = export_opencode(out, state, db_path=db_path, full=False, dry_run=False, since_date=None)
+    # the fixture session's rows are all <= the legacy cursor: consumed
+    assert result["exported"] == 0
+    assert not list(out.glob("*.md"))
+    assert state["opencode"]["sessions"]["ses_fixture"]["watermark"] == 10 ** 13
+    assert "last_session_time" not in state["opencode"]
+
+    _append_opencode_turn(
+        db_path,
+        "ses_fixture",
+        "ses_fixture_m_late",
+        "user",
+        "new turn after the migration",
+        10 ** 13 + 1_000,
+    )
+    followup = export_opencode(out, state, db_path=db_path, full=False, dry_run=False, since_date=None)
+    assert followup["exported"] == 1
+    assert "new turn after the migration" in list(out.glob("*.md"))[0].read_text(encoding="utf-8")
+
+
+def test_opencode_watermark_never_recedes_with_earlier_pending_row(tmp_path: Path) -> None:
+    db_path = tmp_path / "opencode.db"
+    _seed_opencode_db(db_path)
+    out = tmp_path / "out"
+    state = {"opencode": {"sessions": {}}}
+    export_opencode(out, state, db_path=db_path, full=True, dry_run=False, since_date=None)
+    first_watermark = state["opencode"]["sessions"]["ses_fixture"]["watermark"]
+    assert first_watermark > 0
+
+    # an empty user row whose timestamp predates everything, plus a fresh
+    # renderable turn that lands after this run's watermark
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        "INSERT INTO message (id, session_id, time_created, data) VALUES (?,?,?,?)",
+        ("ses_fixture_m_early", "ses_fixture", first_watermark - 10 ** 9, json.dumps({"role": "user"})),
+    )
+    conn.commit()
+    conn.close()
+    _append_opencode_turn(
+        db_path,
+        "ses_fixture",
+        "ses_fixture_m_new",
+        "assistant",
+        "brand new answer",
+        first_watermark + 5_000_000,
+    )
+
+    second = export_opencode(out, state, db_path=db_path, full=False, dry_run=False, since_date=None)
+    assert second["overwritten"] == 1
+    assert "brand new answer" in (out / "20260629_Fixture_OpenCode_Session.md").read_text(encoding="utf-8")
+    # monotonic: the earlier pending row must not drag the watermark back to 0
+    assert state["opencode"]["sessions"]["ses_fixture"]["watermark"] >= first_watermark
+
+    # the empty row's text part commits at its own timestamp: caught by the
+    # hotspot re-render even though that timestamp is below the watermark
+    early_ts = first_watermark - 10 ** 9
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        "INSERT INTO part (id, message_id, session_id, time_created, data) VALUES (?,?,?,?,?)",
+        (
+            "ses_fixture_m_early_p0",
+            "ses_fixture_m_early",
+            "ses_fixture",
+            early_ts,
+            json.dumps({"type": "text", "text": "very late early text"}),
+        ),
+    )
+    conn.commit()
+    conn.close()
+    third = export_opencode(out, state, db_path=db_path, full=False, dry_run=False, since_date=None)
+    assert third["exported"] >= 1
+    assert "very late early text" in (out / "20260629_Fixture_OpenCode_Session.md").read_text(encoding="utf-8")
+
+
 def test_claude_code_export_with_fixture(tmp_path: Path) -> None:
     projects_root = tmp_path / "projects"
     history_file = tmp_path / "history.jsonl"

@@ -146,20 +146,28 @@ def export_opencode(
     conn.row_factory = sqlite3.Row
     opencode_state = state.setdefault("opencode", {})
     session_entries: dict[str, Any] = opencode_state.setdefault("sessions", {})
+    # One-time migration of pre-watermark shapes. The original shape keyed
+    # freshness on session creation time ("created since the last run"), which
+    # froze sessions that kept growing after their first export; an interim
+    # shape used a global message-time cutoff, which burned the cursor whenever
+    # a different completed session pushed it past a retryable session's
+    # unexported rows. Whichever legacy cursor is present becomes
+    # default_watermark: the freshness floor for sessions without a per-session
+    # entry, and the adopted watermark for existing entries. Legacy keys are
+    # dropped so the migration happens exactly once; message timestamps are
+    # always >= their session's creation time, so no full-history rescan and no
+    # backwards move.
+    legacy_cursor = None
     if "last_message_time" in opencode_state:
-        # One-time migration. Selection used to filter on session creation
-        # time ("created since the last run"), which froze sessions that kept
-        # growing after their first export; an interim shape used a global
-        # message-time cutoff, which burned the cursor whenever a different
-        # completed session pushed it past a retryable session's unexported
-        # rows. Adopt the cursor as each existing entry's watermark, then drop
-        # the key so the migration happens exactly once. Message timestamps are
-        # always >= their session's creation time, so no full-history rescan
-        # and no backwards move.
         legacy_cursor = int(opencode_state.pop("last_message_time"))
+    elif "last_session_time" in opencode_state:
+        legacy_cursor = int(opencode_state.pop("last_session_time"))
+    if legacy_cursor is not None:
+        opencode_state.setdefault("default_watermark", legacy_cursor)
         for entry in session_entries.values():
             if isinstance(entry, dict):
                 entry.setdefault("watermark", legacy_cursor)
+    default_watermark = int(opencode_state.get("default_watermark", 0))
 
     cursor = conn.cursor()
     cursor.execute("SELECT id, title, directory, time_created FROM session ORDER BY time_created ASC")
@@ -183,17 +191,20 @@ def export_opencode(
             continue
 
         entry = session_entries.get(session_id)
-        watermark = int(entry.get("watermark", 0)) if isinstance(entry, dict) else 0
+        watermark = int(entry.get("watermark", default_watermark)) if isinstance(entry, dict) else default_watermark
         activity_max = _session_activity_max(conn, session_id)
-        if activity_max <= watermark:
+        if not full and activity_max <= watermark:
+            # Cold session: record the probed watermark so the next run skips
+            # the lookups. Retried sessions keep their watermark untouched.
+            if not dry_run and entry is None:
+                session_entries[session_id] = {"watermark": watermark}
             continue
 
         messages, models, user_count, ceiling, settled = load_opencode_session_messages(conn, session_id)
         if user_count == 0:
-            if settled:
+            if settled and not dry_run:
                 # Settled and nothing renderable: mark the session processed.
-                if not dry_run:
-                    session_entries[session_id] = {"watermark": activity_max}
+                session_entries[session_id] = {"watermark": activity_max}
             # Unsettled: text may still land; the watermark stays untouched so
             # the run after it commits re-renders the session.
             continue
@@ -227,7 +238,10 @@ def export_opencode(
             # byte-identical re-emits write nothing (no mtime churn)
         else:
             wrote = True
-        new_watermark = activity_max if settled else min(ceiling, activity_max)
+        # Monotonic watermark: a settled export may advance up to the
+        # session's message+part activity maximum; an unsettled one keeps the
+        # prior value so the completing turn re-renders.
+        new_watermark = max(watermark, _session_activity_max(conn, session_id) if settled else ceiling)
         if wrote and not dry_run:
             output_path.write_bytes(candidate_bytes)
         if not dry_run:
