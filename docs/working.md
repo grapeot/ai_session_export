@@ -1,5 +1,13 @@
 ## Changelog
 
+### 2026-10-29
+
+- Fixed the OpenCode adapter freezing continued sessions. Incremental selection keyed on `session.time_created` ("created since the last run"), so a session that kept growing after its one-and-only export never re-entered selection: its archive permanently lagged the transcript and nothing downstream could tell. Real-world impact: the 2026-10-28 daily briefing reported Ledger owner approvals as still-pending because the archived operator session ended at 19:55 while the owner's approval and execution happened at 22:3x.
+- Incremental selection now filters sessions by their latest message time (`SELECT ... WHERE id IN (SELECT DISTINCT session_id FROM message WHERE COALESCE(time_created,0) > cutoff)`), and the cutoff advances to the global max message time. State got a new `opencode.last_message_time` key; a legacy state without it is migrated once on the first incremental run by reusing the old creation-time cutoff (message times are always >= creation times, so no full-history rescan and no backward move).
+- Re-emitting an already-archived session now updates the file it already owns instead of creating an `_2` duplicate: new `session_aware_output_path()` + `archived_session_id()` in `utils.py` match existing archive candidates by frontmatter `session_id`; same title + different session keeps its own file, a new session takes the next unique number (same numbering as `unique_output_path()`).
+- Re-emits whose rendered bytes are identical to the archive skip the write entirely (no mtime churn for the semantic index); a shrink guard keeps the bigger archive file when the on-disk source lost history and reports `skipped_shrunk`. The CLI summary line gained `overwritten=` and `skipped_shrunk=` for the OpenCode source.
+- Tests: continued-session overwrite, message-time incremental with legacy-state migration, same-title collision separation and stable re-emission numbering, shrink guard, `archived_session_id` parsing, plus `session_aware_output_path` unit tests. Full suite: 180 passed, 6 skipped (live).
+
 ### 2026-10-28
 
 - Added native Antigravity metadata parsing, session inspection (`--antigravity-list`, `--antigravity-parse`), and archive/unarchive lifecycle commands (`--antigravity-archive`, `--antigravity-unarchive`) in `src/ai_session_export/sources/antigravity.py` and `cli.py`.

@@ -7,7 +7,7 @@ from typing import Any
 
 from ..markdown import render_markdown
 from ..models import MessageTurn, SessionRecord
-from ..utils import ms_to_date, should_skip_session, unique_output_path
+from ..utils import ms_to_date, session_aware_output_path, should_skip_session
 
 
 def load_opencode_session_messages(conn: sqlite3.Connection, session_id: str) -> tuple[list[MessageTurn], list[str], int]:
@@ -71,13 +71,21 @@ def export_opencode(
 
     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
-    last_session_time = int(state.get("opencode", {}).get("last_session_time", 0))
+    opencode_state = state.setdefault("opencode", {})
+    if "last_message_time" not in opencode_state:
+        # One-time migration. Selection used to be keyed on session creation
+        # time, which froze sessions that kept growing after their first
+        # export. Message times are always >= the session creation time, so
+        # reusing the old cutoff starts message-time selection without
+        # rescanning the whole history.
+        opencode_state["last_message_time"] = int(opencode_state.get("last_session_time", 0))
+    cutoff = int(opencode_state.get("last_message_time", 0))
 
     query = "SELECT id, title, directory, time_created FROM session"
     params: tuple[Any, ...] = ()
     if not full:
-        query += " WHERE time_created > ?"
-        params = (last_session_time,)
+        query += " WHERE id IN (SELECT DISTINCT session_id FROM message WHERE COALESCE(time_created, 0) > ?)"
+        params = (cutoff,)
     query += " ORDER BY time_created ASC"
 
     cursor = conn.cursor()
@@ -86,7 +94,8 @@ def export_opencode(
 
     exported = 0
     scanned = 0
-    latest_seen = last_session_time
+    overwritten = 0
+    skipped_shrunk = 0
     output_dir.mkdir(parents=True, exist_ok=True)
 
     for row in rows:
@@ -94,7 +103,6 @@ def export_opencode(
         session_id = row["id"]
         title = (row["title"] or "").strip() or "Untitled"
         session_time = int(row["time_created"] or 0)
-        latest_seen = max(latest_seen, session_time)
 
         if should_skip_session(title):
             continue
@@ -114,13 +122,36 @@ def export_opencode(
         )
         if since_date and date.fromisoformat(record.date) < since_date:
             continue
-        output_path = unique_output_path(output_dir, record.date, record.title)
+        output_path = session_aware_output_path(output_dir, session_id, record.date, record.title)
+        rendered = render_markdown(record)
+        candidate_bytes = rendered.encode("utf-8")
+        if output_path.exists():
+            existing_bytes = output_path.read_bytes()
+            if len(candidate_bytes) < len(existing_bytes):
+                # The on-disk source lost history relative to the archive
+                # (truncated local transcript). Keep the bigger archive file.
+                skipped_shrunk += 1
+                exported += 1
+                continue
+            if existing_bytes == candidate_bytes:
+                # Re-emitted but unchanged: no write, no mtime churn.
+                exported += 1
+                continue
+            overwritten += 1
         if not dry_run:
-            output_path.write_text(render_markdown(record), encoding="utf-8")
+            output_path.write_bytes(candidate_bytes)
         exported += 1
 
-    conn.close()
     if not dry_run:
-        state.setdefault("opencode", {})["last_session_time"] = latest_seen
+        latest = conn.execute("SELECT COALESCE(MAX(COALESCE(time_created, 0)), 0) FROM message").fetchone()[0]
+        opencode_state["last_message_time"] = max(int(opencode_state.get("last_message_time", 0)), int(latest or 0))
+        state["opencode"] = opencode_state
 
-    return {"source": "opencode", "scanned": scanned, "exported": exported, "latest_seen": latest_seen}
+    conn.close()
+    return {
+        "source": "opencode",
+        "scanned": scanned,
+        "exported": exported,
+        "overwritten": overwritten,
+        "skipped_shrunk": skipped_shrunk,
+    }

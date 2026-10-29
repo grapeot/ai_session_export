@@ -415,7 +415,15 @@ def main() -> None:
         else:
             failed = int(result.get("failed", 0))
             failure_summary = f" failed={failed}" if failed else ""
-            print(f"[{source}] exported={result['exported']} scanned={result['scanned']}{failure_summary}{suffix}")
+            extra = ""
+            if source == "opencode":
+                overwritten = int(result.get("overwritten", 0))
+                skipped_shrunk = int(result.get("skipped_shrunk", 0))
+                if overwritten:
+                    extra += f" overwritten={overwritten}"
+                if skipped_shrunk:
+                    extra += f" skipped_shrunk={skipped_shrunk}"
+            print(f"[{source}] exported={result['exported']} scanned={result['scanned']}{failure_summary}{extra}{suffix}")
             for warning in result.get("warnings", []):
                 if "surface" in warning:
                     print(

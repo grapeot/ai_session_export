@@ -30,7 +30,10 @@ archive for browsing, semantic search, and downstream workflows.
 All commands run from the project root.
 
 ```bash
-# Export all default sources (incremental — only new sessions since last run)
+# Export all default sources (incremental — only sessions with new messages
+# since the last run; OpenCode selects by each session's latest message time,
+# so long-lived sessions that keep growing are picked up and their existing
+# archive file is overwritten in place, matched by frontmatter session_id)
 # Second Mind is opt-in and not part of "all".
 python export_sessions.py
 
@@ -95,7 +98,12 @@ matching session using only the transcript content currently on disk. If the
 session date changed, the archive may be renamed to the corrected date prefix.
 If a source file has since lost history (for example a truncated Claude Code
 transcript, see below), the archive loses it too. Back up the archive or recover
-the missing messages into a backfill file first.
+the missing messages into a backfill file first. The OpenCode adapter carries a
+shrink guard: when a re-export renders less content than the existing archive
+file holds, the bigger archive file is kept and the write is reported as
+`skipped_shrunk`. A legacy state file without `last_message_time` is migrated
+once on the first incremental run (the old creation-time cutoff is reused as
+the initial message-time cutoff), so the first run does not rescan history.
 
 ## Output Contract
 

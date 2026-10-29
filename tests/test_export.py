@@ -44,9 +44,11 @@ from ai_session_export.sources.opencode import export_opencode
 from ai_session_export.sources.second_mind import export_second_mind
 from ai_session_export.state import DEFAULT_STATE, load_state, save_state
 from ai_session_export.utils import (
+    archived_session_id,
     ms_to_date,
     resolve_output_path,
     sanitize_filename,
+    session_aware_output_path,
     should_skip_session,
     to_local_date,
     unique_output_path,
@@ -761,6 +763,185 @@ def test_opencode_export_with_fixture(tmp_path: Path) -> None:
     assert 'project_directory: "/home/user/project"' in text
     assert "fixture/model" in text  # surfaced in models_used
     assert 'turn_models: ["fixture/model", "fixture/model"]' in text
+
+
+def _append_opencode_turn(db_path: Path, session_id: str, msg_id: str, role: str, text: str, msg_ts: int) -> None:
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        "INSERT INTO message (id, session_id, time_created, data) VALUES (?,?,?,?)",
+        (msg_id, session_id, msg_ts, json.dumps({"role": role})),
+    )
+    conn.execute(
+        "INSERT INTO part (id, message_id, session_id, time_created, data) VALUES (?,?,?,?,?)",
+        (f"{msg_id}_p0", msg_id, session_id, msg_ts, json.dumps({"type": "text", "text": text})),
+    )
+    conn.commit()
+    conn.close()
+
+
+def test_opencode_continued_session_overwrites_same_file(tmp_path: Path) -> None:
+    db_path = tmp_path / "opencode.db"
+    _seed_opencode_db(db_path)
+    out = tmp_path / "out"
+
+    state = {"opencode": {"last_session_time": 0}}
+    kwargs = dict(db_path=db_path, full=True, dry_run=False, since_date=None)
+    first = export_opencode(out, state, **kwargs)
+    assert first["exported"] == 1
+    files = list(out.glob("*.md"))
+    assert len(files) == 1
+
+    _append_opencode_turn(
+        db_path,
+        "ses_fixture",
+        "ses_fixture_m_extra",
+        "user",
+        "one more turn",
+        int(datetime(2026, 6, 29, 9, 20).timestamp() * 1000),
+    )
+    updated = export_opencode(out, {"opencode": {}}, **kwargs)
+    assert updated["exported"] == 1
+    assert updated["overwritten"] == 1
+    # overwrite must happen in place: no _2 duplicate is created
+    assert list(out.glob("*.md")) == files
+    content = files[0].read_text(encoding="utf-8")
+    assert "message_count: 3" in content
+    assert "one more turn" in content
+
+
+def test_opencode_incremental_selection_uses_message_time(tmp_path: Path) -> None:
+    db_path = tmp_path / "opencode.db"
+    _seed_opencode_db(db_path)
+    out = tmp_path / "out"
+
+    state = {"opencode": {"last_session_time": 0}}
+    export_opencode(out, state, db_path=db_path, full=True, dry_run=False, since_date=None)
+    message_cutoff = state["opencode"]["last_message_time"]
+    assert message_cutoff > 0
+
+    # The session was created before the old creation-time cutoff but grew
+    # after it. Message-time selection must still pick it up, and the
+    # migration from a legacy state must keep the legacy cutoff (never move
+    # backwards to an older value).
+    _append_opencode_turn(
+        db_path,
+        "ses_fixture",
+        "ses_fixture_m_late",
+        "user",
+        "grew after cutoff",
+        message_cutoff + 20_000,
+    )
+    legacy_state = {"opencode": {"last_session_time": message_cutoff + 10_000}}
+    result = export_opencode(out, legacy_state, db_path=db_path, full=False, dry_run=False, since_date=None)
+    assert result["exported"] == 1
+    assert result["overwritten"] == 1
+    assert len(list(out.glob("*.md"))) == 1
+    assert "grew after cutoff" in list(out.glob("*.md"))[0].read_text(encoding="utf-8")
+    assert legacy_state["opencode"]["last_message_time"] > message_cutoff + 10_000
+
+
+def test_opencode_same_title_sessions_keep_separate_files(tmp_path: Path) -> None:
+    db_path = tmp_path / "opencode.db"
+    _seed_opencode_db(db_path)
+    retried_time = int(datetime(2026, 6, 29, 10, 0).timestamp() * 1000)
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        "INSERT INTO session (id, title, directory, time_created) VALUES (?,?,?,?)",
+        ("ses_fixture_b", "Fixture OpenCode Session", "/home/user/project", retried_time),
+    )
+    conn.commit()
+    conn.close()
+    _append_opencode_turn(db_path, "ses_fixture_b", "ses_fixture_b_m0", "user", "Retried fixture session", retried_time)
+
+    out = tmp_path / "out"
+    result = export_opencode(out, {"opencode": {}}, db_path=db_path, full=True, dry_run=False, since_date=None)
+    assert result["exported"] == 2
+    assert result["overwritten"] == 0
+    files = sorted(f.name for f in out.glob("*.md"))
+    assert files == ["20260629_Fixture_OpenCode_Session.md", "20260629_Fixture_OpenCode_Session_2.md"]
+
+
+def test_opencode_reemit_keeps_collision_numbering(tmp_path: Path) -> None:
+    db_path = tmp_path / "opencode.db"
+    _seed_opencode_db(db_path)
+    retried_time = int(datetime(2026, 6, 29, 10, 0).timestamp() * 1000)
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        "INSERT INTO session (id, title, directory, time_created) VALUES (?,?,?,?)",
+        ("ses_fixture_b", "Fixture OpenCode Session", "/home/user/project", retried_time),
+    )
+    conn.commit()
+    conn.close()
+    _append_opencode_turn(db_path, "ses_fixture_b", "ses_fixture_b_m0", "user", "Retried fixture session", retried_time)
+
+    out = tmp_path / "out"
+    export_opencode(out, {"opencode": {}}, db_path=db_path, full=True, dry_run=False, since_date=None)
+    assert len(list(out.glob("*.md"))) == 2
+
+    _append_opencode_turn(
+        db_path,
+        "ses_fixture",
+        "ses_fixture_m_extra",
+        "user",
+        "one more turn",
+        int(datetime(2026, 6, 29, 9, 20).timestamp() * 1000),
+    )
+    result = export_opencode(out, {"opencode": {}}, db_path=db_path, full=True, dry_run=False, since_date=None)
+    assert result["exported"] == 2
+    assert result["overwritten"] == 1
+    names = sorted(f.name for f in out.glob("*.md"))
+    assert names == ["20260629_Fixture_OpenCode_Session.md", "20260629_Fixture_OpenCode_Session_2.md"]
+
+
+def test_opencode_shrink_guard_keeps_bigger_archive(tmp_path: Path) -> None:
+    db_path = tmp_path / "opencode.db"
+    _seed_opencode_db(db_path)
+    out = tmp_path / "out"
+    export_opencode(out, {"opencode": {}}, db_path=db_path, full=True, dry_run=False, since_date=None)
+
+    archive = out / "20260629_Fixture_OpenCode_Session.md"
+    padded = archive.read_text(encoding="utf-8") + "\n<!-- historical tail that the source lost -->\n"
+    archive.write_text(padded, encoding="utf-8")
+    before = archive.read_text(encoding="utf-8")
+
+    result = export_opencode(out, {"opencode": {}}, db_path=db_path, full=True, dry_run=False, since_date=None)
+    assert result["skipped_shrunk"] == 1
+    assert result["exported"] == 1
+    assert archive.read_text(encoding="utf-8") == before
+
+
+def test_session_aware_output_path_matches_by_session_id(tmp_path: Path) -> None:
+    record = SessionRecord(
+        source="opencode",
+        session_id="ses_one",
+        title="Fixture Opencode Session",
+        date="2026-06-29",
+        messages=[MessageTurn(role="user", content="hello")],
+    )
+    (tmp_path / "20260629_Fixture_Opencode_Session.md").write_text(render_markdown(record), encoding="utf-8")
+
+    same = session_aware_output_path(tmp_path, "ses_one", "2026-06-29", "Fixture Opencode Session")
+    assert same == tmp_path / "20260629_Fixture_Opencode_Session.md"
+
+    other = session_aware_output_path(tmp_path, "ses_two", "2026-06-29", "Fixture Opencode Session")
+    assert other == tmp_path / "20260629_Fixture_Opencode_Session_2.md"
+
+
+def test_archived_session_id_parses_frontmatter(tmp_path: Path) -> None:
+    record = SessionRecord(
+        source="opencode",
+        session_id="ses_probe",
+        title="Probe",
+        date="2026-06-29",
+        messages=[MessageTurn(role="user", content="hello")],
+    )
+    path = tmp_path / "probe.md"
+    path.write_text(render_markdown(record), encoding="utf-8")
+    assert archived_session_id(path) == "ses_probe"
+
+    plain = tmp_path / "plain.md"
+    plain.write_text("no frontmatter here\n", encoding="utf-8")
+    assert archived_session_id(plain) is None
 
 
 def test_claude_code_export_with_fixture(tmp_path: Path) -> None:
@@ -2431,7 +2612,7 @@ def test_cli_run_export_all_sources(tmp_path: Path) -> None:
     # State file was persisted with refreshed counters.
     persisted = load_state(state_file)
     assert persisted["second_mind"]["last_export_count"] == 0
-    assert persisted["opencode"]["last_session_time"] > 0
+    assert persisted["opencode"]["last_message_time"] > 0
     assert persisted["claude_code"]["sessions"]["claude-fixture-1"]["latest_timestamp"] > 0
     antigravity_sessions = persisted["antigravity"]["surfaces"]["ide"]["sessions"]
     assert antigravity_sessions["antigravity-session-fixture"]["status"] == "complete"

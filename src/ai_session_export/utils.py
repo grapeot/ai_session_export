@@ -42,6 +42,60 @@ def unique_output_path(output_dir: Path, date_ymd: str, title: str) -> Path:
     return candidate
 
 
+def archived_session_id(path: Path) -> str | None:
+    """Return the session_id recorded in a rendered archive file, if parseable.
+
+    Archive files carry their session id in the YAML frontmatter. Unparsable or
+    unrelated files return None so callers can treat them as foreign sessions
+    and never overwrite them.
+    """
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            head = handle.read(4096)
+    except OSError:
+        return None
+    if not head.startswith("---"):
+        return None
+    end = head.find("---", 3)
+    if end == -1:
+        return None
+    match = re.search(r"^session_id:\s*(.+)$", head[:end], re.MULTILINE)
+    if not match:
+        return None
+    try:
+        return str(json.loads(match.group(1).strip()))
+    except json.JSONDecodeError:
+        return match.group(1).strip().strip('"')
+
+
+def session_aware_output_path(
+    output_dir: Path,
+    session_id: str,
+    date_ymd: str,
+    title: str,
+    max_candidates: int = 512,
+) -> Path:
+    """Resolve the archive path for a session that may already be exported.
+
+    Sessions no longer follow create-once semantics: a long-lived session keeps
+    growing after its first export. Re-emitting it must update the file it
+    already owns instead of creating an ``_2`` duplicate. The same-session check
+    is the frontmatter ``session_id``; a different session keeps its own file
+    and a new session gets the next unique number (identical numbering to
+    :func:`unique_output_path`).
+    """
+    prefix = date_ymd.replace("-", "")
+    stem = f"{prefix}_{sanitize_filename(title)}"
+    candidate = output_dir / f"{stem}.md"
+    counter = 2
+    while candidate.exists() and counter <= max_candidates:
+        if archived_session_id(candidate) == session_id:
+            return candidate
+        candidate = output_dir / f"{stem}_{counter}.md"
+        counter += 1
+    return candidate
+
+
 def should_skip_session(title: str | None) -> bool:
     text = (title or "").strip().lower()
     if not text:
