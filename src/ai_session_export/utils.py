@@ -42,30 +42,59 @@ def unique_output_path(output_dir: Path, date_ymd: str, title: str) -> Path:
     return candidate
 
 
-def archived_session_id(path: Path) -> str | None:
+def archived_session_id(path: Path, max_head_bytes: int = 65536) -> str | None:
     """Return the session_id recorded in a rendered archive file, if parseable.
 
-    Archive files carry their session id in the YAML frontmatter. Unparsable or
-    unrelated files return None so callers can treat them as foreign sessions
-    and never overwrite them.
+    Archive files carry their session id in the YAML frontmatter, a few lines
+    from the top. The frontmatter itself grows with the session (per-turn
+    ``turn_models`` lists), so the closing ``---`` can sit beyond any fixed
+    window: when the close marker is outside the head slice, treat the slice
+    as still-frontmatter instead of failing to parse. Files that do not parse
+    as an archive return None; callers must treat None as a foreign session
+    and never overwrite the file.
     """
     try:
-        with path.open("r", encoding="utf-8") as handle:
-            head = handle.read(4096)
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
+            head = handle.read(max_head_bytes)
     except OSError:
         return None
     if not head.startswith("---"):
         return None
-    end = head.find("---", 3)
-    if end == -1:
-        return None
-    match = re.search(r"^session_id:\s*(.+)$", head[:end], re.MULTILINE)
+    close = head.find("\n---", 3)
+    window = head[:close] if close != -1 else head
+    match = re.search(r"^session_id:\s*(.+)$", window, re.MULTILINE)
     if not match:
         return None
     try:
         return str(json.loads(match.group(1).strip()))
     except json.JSONDecodeError:
         return match.group(1).strip().strip('"')
+
+
+def claim_archive_file(output_dir: Path, session_id: str, prefix: str | None = None) -> Path | None:
+    """Find a session's archive file inside ``output_dir`` by frontmatter id.
+
+    Used when the stem chain (creation date + current title) holds no match,
+    for example after the session was renamed since its first export. Returns
+    the file for in-place overwrite, without renaming; None when nothing
+    claims it. Same-day files are probed first.
+    """
+    try:
+        candidates = sorted(
+            (item for item in output_dir.iterdir() if item.is_file() and item.name.endswith(".md")),
+            key=lambda item: item.name,
+        )
+    except OSError:
+        return None
+    if prefix:
+        same_day = [item for item in candidates if item.name.startswith(prefix)]
+        others = [item for item in candidates if not item.name.startswith(prefix)]
+    else:
+        same_day, others = candidates, []
+    for item in same_day + others:
+        if archived_session_id(item) == session_id:
+            return item
+    return None
 
 
 def session_aware_output_path(
@@ -77,22 +106,34 @@ def session_aware_output_path(
 ) -> Path:
     """Resolve the archive path for a session that may already be exported.
 
-    Sessions no longer follow create-once semantics: a long-lived session keeps
-    growing after its first export. Re-emitting it must update the file it
-    already owns instead of creating an ``_2`` duplicate. The same-session check
-    is the frontmatter ``session_id``; a different session keeps its own file
-    and a new session gets the next unique number (identical numbering to
-    :func:`unique_output_path`).
+    Sessions are long-lived and keep growing after their first export.
+    Re-emitting one must update the file it already owns (matched by
+    frontmatter ``session_id``), not create an ``_2`` duplicate. The search
+    walks the numbering chain implied by :func:`unique_output_path`; every
+    returned path is either a confirmed same-session file or a non-existing
+    create path. If the chain runs out without a match, claim the session's
+    file by its frontmatter id anywhere in the directory, then fall back to
+    the next guaranteed-new number.
     """
     prefix = date_ymd.replace("-", "")
     stem = f"{prefix}_{sanitize_filename(title)}"
     candidate = output_dir / f"{stem}.md"
     counter = 2
-    while candidate.exists() and counter <= max_candidates:
+    while counter <= max_candidates:
+        if not candidate.exists():
+            return candidate
         if archived_session_id(candidate) == session_id:
             return candidate
         candidate = output_dir / f"{stem}_{counter}.md"
         counter += 1
+    claimed = claim_archive_file(output_dir, session_id, prefix=prefix)
+    if claimed is not None:
+        return claimed
+    fallback = max_candidates + 1
+    candidate = output_dir / f"{stem}_{fallback}.md"
+    while candidate.exists():
+        fallback += 1
+        candidate = output_dir / f"{stem}_{fallback}.md"
     return candidate
 
 
