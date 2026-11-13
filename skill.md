@@ -233,7 +233,7 @@ whenever its backfill file changes, even if the local transcript did not.
 | DeepSeek Harness | `~/.dsh/sessions/*/*/session[.vN].jsonl[.zstd]` | JSONL or Zstandard; select the newest generation per session directory (currently V4) |
 | Gemini CLI | `~/.gemini/tmp/*/chats/session-*.json` or `.jsonl` | JSON / JSONL |
 | Grok Build | `~/.grok/sessions/*/*/updates.jsonl` + `summary.json` | JSONL + JSON |
-| WorkBuddy | `~/.workbuddy-ai/projects/*/<session>.jsonl` (+ `~/.workbuddy-ai/workbuddy.db` for titles and archive status) | JSONL + SQLite; user text is the `<user_query>` inside each injected `<system-reminder>` message |
+| WorkBuddy | `~/.workbuddy-ai/projects/*/<session>.jsonl` (+ `~/.workbuddy-ai/workbuddy.db` for titles and archive status) | JSONL + SQLite; user text is the `<user_query>` after the injected `<system-reminder>` blocks; tasks deleted in the app are skipped |
 | Second Mind | `./second_mind_export.json` | JSON |
 
 Second Mind is opt-in: it is excluded from the default `all` run and only

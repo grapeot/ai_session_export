@@ -172,17 +172,6 @@ Export sessions created by the Grok Build platform (`xai-org/grok-build`).
   - Uses the summary model as session-level inventory only; never assigns it to earlier turns.
 
 
-## WorkBuddy
-
-Export tasks from WorkBuddy, Tencent's desktop agent (observed on 5.9.4, macOS).
-
-- **CLI Options**: `--source workbuddy --workbuddy-dir <path>` (repeatable projects root) and `--workbuddy-db <path>`.
-- **Implementation Details**:
-  - Reads one JSONL transcript per task from `~/.workbuddy-ai/projects/<cwd>/<session_id>.jsonl` (and the pre-5.9 `~/.workbuddy/projects`). Items follow the OpenAI Responses shape: `message`, `reasoning`, `function_call`, `function_call_result`, `ai-title`.
-  - Every user message carries a large injected `<system-reminder>` block (environment and identity context); only the text inside `<user_query>` is exported.
-  - Exports user and assistant text only; reasoning and tool calls stay private, matching the Codex adapter.
-  - Titles come from `workbuddy.db` (`custom_title` when the user renamed the task, else `title`), then the `ai-title` record, then the first user line. Renaming re-exports the task in place.
-  - Archived tasks are still exported and marked `surface: "archived"`; the database is opened read-only.
 ## Cursor CLI
 
 Export sessions created by the Cursor CLI agent (`cursor agent`). This is a
@@ -200,6 +189,19 @@ namespaces do not overlap. Archives use `source: cursor_cli` and the
   - Takes models from the system prompt fingerprint, the date from `meta.json` `createdAtMs` (falling back to the store metadata), and the project directory from `meta.json` `cwd` or a `Workspace Path:` line whose md5 matches the workspace directory name.
   - Incremental state records the root blob id along with the update timestamp, because sessions without `meta.json` have no live-updated timestamp.
 
+
+## WorkBuddy
+
+Export tasks from WorkBuddy, Tencent's desktop agent (observed on 5.9.4, macOS).
+
+- **CLI Options**: `--source workbuddy --workbuddy-dir <path>` (repeatable projects root) and `--workbuddy-db <path>`.
+- **Implementation Details**:
+  - Reads one JSONL transcript per task from `~/.workbuddy-ai/projects/<cwd>/<session_id>.jsonl`. `~/.workbuddy/projects` is also scanned because the app bundle lists it as a project root (assumed pre-5.9 location, not verified); a task found in both is read once, from the newer file. Items follow the OpenAI Responses shape: `message`, `reasoning`, `function_call`, `function_call_result`, `ai-title`.
+  - Every user message carries injected `<system-reminder>` blocks (environment and identity context). They are stripped first and only the `<user_query>` text is exported; a part with an unclosed reminder or another leftover wrapper is dropped.
+  - Exports user and assistant text only; reasoning and tool calls stay private, matching the Codex adapter. Models are recorded by provider model id.
+  - Titles come from `workbuddy.db` (`custom_title` when the user renamed the task, else `title`), then the `ai-title` record, then the first user line. A rename updates the archive file's frontmatter in place; the file name keeps the title it was first exported under.
+  - Archived tasks are exported like any other. Tasks deleted in the app (`deleted_at` set) are not exported; an archive file written before the deletion is left as it is.
+  - The database is opened read-only. If it cannot be read, titles from the previous run are kept rather than falling back to `ai-title`.
 
 ## Output Format
 

@@ -432,6 +432,7 @@ def main() -> None:
         dsh_sessions_dir=args.dsh_sessions_dir,
         gemini_dir=args.gemini_dir,
         grok_sessions_dir=args.grok_sessions_dir,
+        # getattr like claude_backfill_dir: tests and wrappers may pass a namespace without these flags.
         workbuddy_project_dirs=tuple(args.workbuddy_dir) if getattr(args, "workbuddy_dir", None) else None,
         workbuddy_db=getattr(args, "workbuddy_db", DEFAULT_WORKBUDDY_DB),
         since_date=args.since_date,

@@ -74,11 +74,12 @@ def _session_b() -> list[dict]:
     ]
 
 
-def _make_db(path: Path, rows: list[tuple[str, str, str, str]]) -> None:
+def _make_db(path: Path, rows: list[tuple[str, str, str, str]], deleted: dict | None = None) -> None:
     conn = sqlite3.connect(path)
-    conn.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, cwd TEXT, title TEXT, custom_title TEXT, status TEXT)")
-    conn.executemany("INSERT INTO sessions (id, cwd, title, custom_title, status) VALUES (?, ?, ?, ?, ?)",
-                     [(sid, CWD, title, custom, status) for sid, title, custom, status in rows])
+    conn.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, cwd TEXT, title TEXT, custom_title TEXT, status TEXT, "
+                 "deleted_at INTEGER)")
+    conn.executemany("INSERT INTO sessions (id, cwd, title, custom_title, status, deleted_at) VALUES (?, ?, ?, ?, ?, ?)",
+                     [(sid, CWD, title, custom, status, (deleted or {}).get(sid)) for sid, title, custom, status in rows])
     conn.commit()
     conn.close()
 
@@ -97,8 +98,8 @@ def test_parse_keeps_only_user_query_and_assistant_text(tmp_path: Path) -> None:
     joined = "\n".join(m.content for m in record.messages)
     for private in ("system-reminder", "secret identity notes", "private chain of thought", "wrote draft.md"):
         assert private not in joined
-    assert record.models_used == ["Example 27B"]
-    assert record.messages[0].model == "Example 27B"
+    assert record.models_used == ["org/example-27b"]  # provider model id, not the UI label
+    assert record.messages[0].model == "org/example-27b"
     assert parsed.latest_timestamp_ms == T0 + 62000
 
 
@@ -111,19 +112,65 @@ def test_user_text_without_query_tag_strips_reminder(tmp_path: Path) -> None:
     assert parsed is not None and parsed.record.messages[0].content == "plain request"
 
 
-def test_meta_prefers_custom_title_and_marks_archived(tmp_path: Path) -> None:
+def test_meta_prefers_custom_title_exports_archived_skips_deleted(tmp_path: Path) -> None:
     db = tmp_path / "workbuddy.db"
+    sid_c = "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff"
     _make_db(db, [(SID_A, "Draft meeting reminder", "Renamed by user", "completed"),
-                  (SID_B, "Explain progressive disclosure", "", "archived")])
+                  (SID_B, "Explain progressive disclosure", "", "archived"),
+                  (sid_c, "Gone", "", "completed")], deleted={sid_c: 1794528999000})
     meta = load_workbuddy_meta(db)
     a = parse_workbuddy_session_file(_write_session(tmp_path / "p", SID_A, _session_a()), meta)
     b = parse_workbuddy_session_file(_write_session(tmp_path / "p", SID_B, _session_b()), meta)
-    assert a is not None and a.record.title == "Renamed by user" and a.record.surface == ""
-    assert b is not None and b.record.title == "Explain progressive disclosure" and b.record.surface == "archived"
+    c_lines = [dict(item, sessionId=sid_c) for item in _session_b()]
+    c = parse_workbuddy_session_file(_write_session(tmp_path / "p", sid_c, c_lines), meta)
+    assert a is not None and a.record.title == "Renamed by user"
+    assert b is not None and b.record.title == "Explain progressive disclosure" and b.record.surface == ""
+    assert c is None  # deleted in the app
 
 
-def test_missing_db_is_tolerated(tmp_path: Path) -> None:
-    assert load_workbuddy_meta(tmp_path / "nope.db") == {}
+def test_missing_or_relative_db_is_tolerated(tmp_path: Path, monkeypatch) -> None:
+    assert load_workbuddy_meta(tmp_path / "nope.db") is None
+    db = tmp_path / "workbuddy.db"
+    _make_db(db, [(SID_A, "T", "", "completed")])
+    monkeypatch.chdir(tmp_path)
+    assert load_workbuddy_meta(Path("workbuddy.db")) == {SID_A: load_workbuddy_meta(db)[SID_A]}
+
+
+def test_query_inside_reminder_and_unclosed_reminder_do_not_leak(tmp_path: Path) -> None:
+    quoted = ('<system-reminder><user_query>old quoted request</user_query></system-reminder>\n'
+              '<user_query>real request</user_query>')
+    lines = [{"type": "message", "role": "user", "sessionId": SID_B, "timestamp": T0,
+              "content": [{"type": "input_text", "text": quoted}]},
+             {"type": "message", "role": "user", "sessionId": SID_B, "timestamp": T0 + 1,
+              "content": [{"type": "input_text", "text": "<system-reminder>identity secrets, never closed"}]},
+             {"type": "message", "role": "assistant", "sessionId": SID_B, "timestamp": T0 + 2,
+              "content": [{"type": "output_text", "text": "ok"}]}]
+    parsed = parse_workbuddy_session_file(_write_session(tmp_path, SID_B, lines), {})
+    assert parsed is not None
+    assert [m.content for m in parsed.record.messages] == ["real request", "ok"]
+
+
+def test_truncated_utf8_tail_is_skipped(tmp_path: Path) -> None:
+    path = _write_session(tmp_path, SID_B, _session_b())
+    with path.open("ab") as handle:
+        handle.write('{"type": "message", "role": "user", "content": "中'.encode("utf-8")[:-1])
+    parsed = parse_workbuddy_session_file(path, {})
+    assert parsed is not None and len(parsed.record.messages) == 2
+
+
+def test_same_session_in_two_roots_is_read_once_from_newest(tmp_path: Path) -> None:
+    old_root, new_root = tmp_path / "old", tmp_path / "new"
+    old = _write_session(old_root, SID_A, _session_a()[:5])
+    new = _write_session(new_root, SID_A, _session_a())
+    os.utime(old, (1, 1))
+    out = tmp_path / "out"
+    state: dict = {}
+    result = export_workbuddy(out, state, full=False, dry_run=False, since_date=None,
+                              project_dirs=(new_root, old_root), db_path=tmp_path / "none.db")
+    assert result == {"source": "workbuddy", "scanned": 1, "exported": 1}
+    text = (out / state["workbuddy"]["sessions"][SID_A]["output_file"]).read_text(encoding="utf-8")
+    assert "Moved to Friday 10 AM and saved." in text
+    assert new.exists()
 
 
 def test_export_incremental_and_rename(tmp_path: Path) -> None:
@@ -156,6 +203,35 @@ def test_export_incremental_and_rename(tmp_path: Path) -> None:
     assert 'title: "Friday sync note"' in out_a.read_text(encoding="utf-8")
     assert len(list(out.glob("*.md"))) == 2  # updated in place, no duplicate
 
+    # The DB becomes unreadable: nothing is re-exported, and the renamed title survives a transcript change.
+    db.unlink()
+    assert export_workbuddy(out, state, full=False, dry_run=False, since_date=None, project_dirs=(root,),
+                            db_path=db)["exported"] == 0
+    path_a = next(root.glob(f"*/{SID_A}.jsonl"))
+    with path_a.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps({"type": "message", "role": "assistant", "sessionId": SID_A, "timestamp": T0 + 90000,
+                                 "content": [{"type": "output_text", "text": "One more thing."}]}) + "\n")
+    assert export_workbuddy(out, state, full=False, dry_run=False, since_date=None, project_dirs=(root,),
+                            db_path=db)["exported"] == 1
+    text_a = out_a.read_text(encoding="utf-8")
+    assert 'title: "Friday sync note"' in text_a and "One more thing." in text_a
+
+
+def test_delete_in_app_after_export_stops_updates(tmp_path: Path) -> None:
+    root = tmp_path / "projects"
+    _write_session(root, SID_B, _session_b())
+    db = tmp_path / "workbuddy.db"
+    _make_db(db, [(SID_B, "Explain", "", "completed")])
+    out, state = tmp_path / "out", {}
+    assert export_workbuddy(out, state, full=False, dry_run=False, since_date=None, project_dirs=(root,),
+                            db_path=db)["exported"] == 1
+    conn = sqlite3.connect(db)
+    conn.execute("UPDATE sessions SET deleted_at = 1 WHERE id = ?", (SID_B,))
+    conn.commit()
+    conn.close()
+    assert export_workbuddy(out, state, full=False, dry_run=False, since_date=None, project_dirs=(root,),
+                            db_path=db)["exported"] == 0
+
 
 def test_dry_run_writes_nothing(tmp_path: Path) -> None:
     root = tmp_path / "projects"
@@ -165,7 +241,6 @@ def test_dry_run_writes_nothing(tmp_path: Path) -> None:
                               db_path=tmp_path / "none.db")
     assert result["exported"] == 1
     assert not out.exists() or not any(out.iterdir())
-    assert os.environ.get("TZ") == "UTC"  # conftest pins it; dates below rely on it
 
 
 def test_since_date_filters(tmp_path: Path) -> None:
