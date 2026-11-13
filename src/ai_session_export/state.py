@@ -17,6 +17,7 @@ DEFAULT_STATE = {
     "dsh": {"sessions": {}},
     "gemini": {"sessions": {}},
     "grok": {"sessions": {}},
+    "workbuddy": {"sessions": {}},
 }
 
 
