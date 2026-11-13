@@ -15,6 +15,7 @@ from .gemini import export_gemini
 from .grok import export_grok
 from .opencode import export_opencode
 from .second_mind import export_second_mind
+from .workbuddy import export_workbuddy
 
 __all__ = [
     "export_antigravity",
@@ -30,4 +31,5 @@ __all__ = [
     "export_grok",
     "export_opencode",
     "export_second_mind",
+    "export_workbuddy",
 ]

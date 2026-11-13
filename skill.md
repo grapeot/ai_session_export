@@ -2,7 +2,7 @@
 name: ai-session-export
 description: >-
   Export AI coding session transcripts from OpenCode, Claude Code, Codex, Google
-  Antigravity, Cursor, Cursor CLI, DeepSeek Harness, Gemini CLI, Grok Build, and Second Mind into a unified Markdown
+  Antigravity, Cursor, Cursor CLI, DeepSeek Harness, Gemini CLI, Grok Build, WorkBuddy, and Second Mind into a unified Markdown
   archive. Run as a CLI or periodic cron job.
 ---
 
@@ -46,6 +46,7 @@ python export_sessions.py --source cursor-cli
 python export_sessions.py --source dsh
 python export_sessions.py --source gemini
 python export_sessions.py --source grok
+python export_sessions.py --source workbuddy
 
 # Full re-export (render everything, ignoring watermarks; heals restored
 # or modified archives)
@@ -66,6 +67,7 @@ python export_sessions.py --cursor-cli-dir /path/to/.cursor/chats
 python export_sessions.py --dsh-sessions-dir /path/to/.dsh/sessions
 python export_sessions.py --gemini-dir /path/to/.gemini/tmp
 python export_sessions.py --grok-sessions-dir /path/to/.grok/sessions
+python export_sessions.py --workbuddy-dir /path/to/.workbuddy-ai/projects --workbuddy-db /path/to/workbuddy.db
 
 # Inspect, parse, archive, or unarchive native Antigravity sessions
 python export_sessions.py --antigravity-list --antigravity-status all --json
@@ -231,6 +233,7 @@ whenever its backfill file changes, even if the local transcript did not.
 | DeepSeek Harness | `~/.dsh/sessions/*/*/session[.vN].jsonl[.zstd]` | JSONL or Zstandard; select the newest generation per session directory (currently V4) |
 | Gemini CLI | `~/.gemini/tmp/*/chats/session-*.json` or `.jsonl` | JSON / JSONL |
 | Grok Build | `~/.grok/sessions/*/*/updates.jsonl` + `summary.json` | JSONL + JSON |
+| WorkBuddy | `~/.workbuddy-ai/projects/*/<session>.jsonl` (+ `~/.workbuddy-ai/workbuddy.db` for titles and archive status) | JSONL + SQLite; user text is the `<user_query>` inside each injected `<system-reminder>` message |
 | Second Mind | `./second_mind_export.json` | JSON |
 
 Second Mind is opt-in: it is excluded from the default `all` run and only

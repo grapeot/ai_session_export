@@ -12,6 +12,7 @@ claude_code/
 codex/
 cursor/
 cursor_cli/
+workbuddy/
 opencode/
 second_mind/
 .env

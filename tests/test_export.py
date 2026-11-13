@@ -3117,6 +3117,8 @@ def test_cli_run_export_all_sources(tmp_path: Path) -> None:
         dsh_sessions_dir=dsh_dir,
         gemini_dir=tmp_path / "absent-gemini",
         grok_sessions_dir=tmp_path / "absent-grok",
+        workbuddy_project_dirs=(tmp_path / "absent-workbuddy",),
+        workbuddy_db=tmp_path / "absent-workbuddy.db",
     )
 
     # Second Mind is opt-in: seeding its JSON and passing the path must not
@@ -3131,6 +3133,7 @@ def test_cli_run_export_all_sources(tmp_path: Path) -> None:
         "dsh",
         "gemini",
         "grok",
+        "workbuddy",
     }
     cursor_cli_result = next(r for r in results if r["source"] == "cursor_cli")
     assert cursor_cli_result == {"source": "cursor_cli", "scanned": 1, "exported": 1}

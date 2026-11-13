@@ -21,6 +21,7 @@ src/ai_session_export/     # reusable Python package
     claude_code.py
     codex.py
     antigravity.py
+    workbuddy.py
 scripts/                   # shell entrypoints
 tests/                     # unit + integration + live e2e
 docs/                      # PRD, RFC, working, test docs

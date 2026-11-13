@@ -1,5 +1,11 @@
 ## Changelog
 
+### 2026-11-12
+
+- Added the WorkBuddy source adapter (`src/ai_session_export/sources/workbuddy.py`), registered in `sources/__init__.py`, `cli.py` (`--source workbuddy`, `--workbuddy-dir`, `--workbuddy-db`, included in `all`) and `state.py` (`DEFAULT_STATE["workbuddy"]`). Storage was mapped from real WorkBuddy 5.9.4 tasks driven through the app's own UI with a local model: per-task JSONL under `~/.workbuddy-ai/projects/<cwd>/` (pre-5.9: `~/.workbuddy/projects`), Responses-style items, and a `workbuddy.db` `sessions` table carrying `title`, `custom_title` (rename) and `status` (`archived`).
+- User text is taken from `<user_query>` inside the injected `<system-reminder>` message; reasoning, tool calls and tool results stay private. Titles prefer the DB (`custom_title`, then `title`), then `ai-title`, then the first user line. Incremental state tracks transcript mtime plus the DB title, so a rename in the app re-exports the task in place. Archived tasks export with `surface: "archived"`.
+- Tests: `tests/test_workbuddy.py` (synthetic fixtures: query extraction and privacy, reminder stripping without a query tag, custom title and archive status, missing DB, incremental + rename-in-place, dry run, `--since-date`); the all-sources CLI test now points WorkBuddy at absent paths. Full suite: 201 passed, 6 skipped (live).
+
 ### 2026-10-29
 
 - Fixed the OpenCode adapter freezing continued sessions. Incremental selection keyed on session creation time ("created since the last run"), so a session that kept growing after its one-and-only export never re-entered selection: the archive permanently lagged the transcript while looking complete downstream.

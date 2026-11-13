@@ -17,6 +17,7 @@ Export AI coding session transcripts from multiple tools into a unified Markdown
 | DeepSeek Harness | `~/.dsh/sessions/*/*/session[.vN].jsonl[.zstd]` |
 | Gemini CLI | `~/.gemini/tmp/*/chats/session-*.json` or `.jsonl` |
 | Grok Build | `~/.grok/sessions/*/*/updates.jsonl` and `summary.json` |
+| WorkBuddy | `~/.workbuddy-ai/projects/*/<session>.jsonl` (older releases: `~/.workbuddy/projects`) and `~/.workbuddy-ai/workbuddy.db` |
 | Second Mind | `second_mind_export.json` |
 
 Second Mind is opt-in: it is excluded from the default `all` run and only
@@ -41,6 +42,7 @@ python export_sessions.py --source cursor-cli
 python export_sessions.py --source dsh
 python export_sessions.py --source gemini
 python export_sessions.py --source grok
+python export_sessions.py --source workbuddy
 
 # Full re-export (ignore incremental state)
 python export_sessions.py --full
@@ -169,6 +171,18 @@ Export sessions created by the Grok Build platform (`xai-org/grok-build`).
   - Omits thoughts, tool execution steps, hidden host prompts, and nested subagent sessions.
   - Uses the summary model as session-level inventory only; never assigns it to earlier turns.
 
+
+## WorkBuddy
+
+Export tasks from WorkBuddy, Tencent's desktop agent (observed on 5.9.4, macOS).
+
+- **CLI Options**: `--source workbuddy --workbuddy-dir <path>` (repeatable projects root) and `--workbuddy-db <path>`.
+- **Implementation Details**:
+  - Reads one JSONL transcript per task from `~/.workbuddy-ai/projects/<cwd>/<session_id>.jsonl` (and the pre-5.9 `~/.workbuddy/projects`). Items follow the OpenAI Responses shape: `message`, `reasoning`, `function_call`, `function_call_result`, `ai-title`.
+  - Every user message carries a large injected `<system-reminder>` block (environment and identity context); only the text inside `<user_query>` is exported.
+  - Exports user and assistant text only; reasoning and tool calls stay private, matching the Codex adapter.
+  - Titles come from `workbuddy.db` (`custom_title` when the user renamed the task, else `title`), then the `ai-title` record, then the first user line. Renaming re-exports the task in place.
+  - Archived tasks are still exported and marked `surface: "archived"`; the database is opened read-only.
 ## Cursor CLI
 
 Export sessions created by the Cursor CLI agent (`cursor agent`). This is a

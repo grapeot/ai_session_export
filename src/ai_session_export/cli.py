@@ -29,6 +29,7 @@ from .sources.cursor_cli import DEFAULT_CURSOR_CLI_DIR
 from .sources.dsh import DEFAULT_DSH_SESSIONS_DIR
 from .sources.gemini import DEFAULT_GEMINI_DIR, export_gemini
 from .sources.grok import DEFAULT_GROK_SESSIONS_DIR, export_grok
+from .sources.workbuddy import DEFAULT_WORKBUDDY_DB, DEFAULT_WORKBUDDY_PROJECT_DIRS, export_workbuddy
 from .state import load_state, save_state
 from .utils import date_from_cli
 
@@ -38,7 +39,7 @@ SECOND_MIND_JSON = BASE_DIR / "second_mind_export.json"
 STATE_FILE = BASE_DIR / ".export_state.json"
 DEFAULT_OPENCODE_DB = Path.home() / ".local" / "share" / "opencode" / "opencode.db"
 
-SOURCE_CHOICES = ["all", "second-mind", "opencode", "claude-code", "antigravity", "codex", "cursor", "cursor-cli", "dsh", "gemini", "grok"]
+SOURCE_CHOICES = ["all", "second-mind", "opencode", "claude-code", "antigravity", "codex", "cursor", "cursor-cli", "dsh", "gemini", "grok", "workbuddy"]
 ANTIGRAVITY_SURFACE_CHOICES = ["all", "2", "ide", "cli"]
 ANTIGRAVITY_STATUS_CHOICES = ["all", "active", "archived"]
 
@@ -65,6 +66,8 @@ def run_export(
     dsh_sessions_dir: Path = DEFAULT_DSH_SESSIONS_DIR,
     gemini_dir: Path = DEFAULT_GEMINI_DIR,
     grok_sessions_dir: Path = DEFAULT_GROK_SESSIONS_DIR,
+    workbuddy_project_dirs: tuple[Path, ...] | None = None,
+    workbuddy_db: Path = DEFAULT_WORKBUDDY_DB,
 ) -> list[dict[str, Any]]:
     state = load_state(state_file)
     results: list[dict[str, Any]] = []
@@ -168,6 +171,18 @@ def run_export(
     if source in {"grok", "all"}:
         results.append(export_grok(base_dir / "grok", state, full=full, dry_run=dry_run,
                                    since_date=since_date, sessions_dir=grok_sessions_dir))
+    if source in {"workbuddy", "all"}:
+        results.append(
+            export_workbuddy(
+                base_dir / "workbuddy",
+                state,
+                full=full,
+                dry_run=dry_run,
+                since_date=since_date,
+                project_dirs=workbuddy_project_dirs or DEFAULT_WORKBUDDY_PROJECT_DIRS,
+                db_path=workbuddy_db,
+            )
+        )
 
     if not dry_run:
         save_state(state, state_file)
@@ -290,6 +305,18 @@ def parse_args() -> argparse.Namespace:
                         help="Override the Gemini CLI temporary project root.")
     parser.add_argument("--grok-sessions-dir", type=Path, default=DEFAULT_GROK_SESSIONS_DIR,
                         help="Override the Grok Build sessions root.")
+    parser.add_argument(
+        "--workbuddy-dir",
+        type=Path,
+        action="append",
+        help="Override a WorkBuddy projects directory; repeat for multiple roots.",
+    )
+    parser.add_argument(
+        "--workbuddy-db",
+        type=Path,
+        default=DEFAULT_WORKBUDDY_DB,
+        help="Override the WorkBuddy workbuddy.db path (titles and archive status).",
+    )
     parser.add_argument("--since-date", type=date_from_cli, help="Only export sessions on or after YYYY-MM-DD.")
     return parser.parse_args()
 
@@ -405,6 +432,8 @@ def main() -> None:
         dsh_sessions_dir=args.dsh_sessions_dir,
         gemini_dir=args.gemini_dir,
         grok_sessions_dir=args.grok_sessions_dir,
+        workbuddy_project_dirs=tuple(args.workbuddy_dir) if getattr(args, "workbuddy_dir", None) else None,
+        workbuddy_db=getattr(args, "workbuddy_db", DEFAULT_WORKBUDDY_DB),
         since_date=args.since_date,
     )
     for result in results:
