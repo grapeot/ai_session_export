@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import json
+import tempfile
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import Any, Iterator, NamedTuple
 
 from ..markdown import render_markdown
 from ..models import MessageTurn, SessionRecord
@@ -162,23 +163,55 @@ def _iter_session_files(project_dirs: tuple[Path, ...]) -> list[Path]:
     return sorted(files)
 
 
-def _load_history_titles(history_files: tuple[Path, ...]) -> dict[str, list[tuple[int, str]]]:
+def _iter_jsonl(file_path: Path, diagnostics: list[dict[str, Any]]) -> Iterator[tuple[int, dict[str, Any]]]:
+    """Decode each physical line independently; never echo transcript data in diagnostics."""
+    with file_path.open("rb") as handle:
+        for number, raw_line in enumerate(handle, 1):
+            line = raw_line.strip()
+            cleaned = line.lstrip(b"\x00").strip()
+            recovered = cleaned != line
+            if not cleaned and not recovered:
+                continue
+            try:
+                event = json.loads(cleaned.decode("utf-8"))
+                if not isinstance(event, dict):
+                    raise ValueError("expected a JSON object")
+            except (UnicodeDecodeError, ValueError):
+                diagnostics.append({"path": str(file_path), "line": number, "kind": "skipped_line",
+                                    "error": f"line {number}: skipped invalid JSON/UTF-8 or non-object record"})
+                continue
+            if recovered:
+                diagnostics.append({"path": str(file_path), "line": number, "kind": "recovered_line",
+                                    "error": f"line {number}: recovered record after removing leading NUL bytes"})
+            yield number, event
+
+
+def _load_history_titles(
+    history_files: tuple[Path, ...], diagnostics: list[dict[str, Any]] | None = None,
+) -> dict[str, list[tuple[int, str]]]:
+    diagnostics = diagnostics if diagnostics is not None else []
     titles: dict[str, list[tuple[int, str]]] = {}
     for history_file in history_files:
         if not history_file.exists():
             continue
-        with history_file.open("r", encoding="utf-8") as handle:
-            for line in handle:
-                line = line.strip()
-                if not line:
+        try:
+            for number, entry in _iter_jsonl(history_file, diagnostics):
+                try:
+                    session_id = entry.get("sessionId")
+                    display = entry.get("display") or ""
+                    if not isinstance(session_id, str) or not isinstance(display, str):
+                        raise ValueError("invalid history fields")
+                    display = display.strip()
+                    timestamp = int(entry.get("timestamp") or 0)
+                except (ValueError, TypeError, OverflowError):
+                    diagnostics.append({"path": str(history_file), "line": number, "kind": "skipped_line",
+                                        "error": f"line {number}: skipped invalid history fields"})
                     continue
-                entry = json.loads(line)
-                session_id = entry.get("sessionId")
-                display = (entry.get("display") or "").strip()
-                timestamp = int(entry.get("timestamp") or 0)
                 if not session_id or not display:
                     continue
                 titles.setdefault(session_id, []).append((timestamp, display))
+        except OSError as error:
+            diagnostics.append({"path": str(history_file), "error": f"cannot load history ({type(error).__name__})"})
     for values in titles.values():
         values.sort(key=lambda item: item[0])
     return titles
@@ -221,6 +254,7 @@ def parse_claude_session_file(
     history_titles: dict[str, list[tuple[int, str]]],
     *,
     backfill_dir: Path | None = None,
+    diagnostics: list[dict[str, Any]] | None = None,
 ) -> ParsedClaudeSession | None:
     session_id = ""
     cwd = ""
@@ -235,61 +269,57 @@ def parse_claude_session_file(
     first_parent_uuid: str | None = None
     seen_uuid_record = False
 
-    with file_path.open("r", encoding="utf-8") as handle:
-        for raw_line in handle:
-            line = raw_line.strip()
-            if not line:
-                continue
-            event = json.loads(line)
-            record_uuid = event.get("uuid")
-            if isinstance(record_uuid, str) and record_uuid:
-                uuids.add(record_uuid)
-                if not seen_uuid_record:
-                    seen_uuid_record = True
-                    parent = event.get("parentUuid")
-                    first_parent_uuid = parent if isinstance(parent, str) and parent else None
-            raw_timestamp = event.get("timestamp")
-            if isinstance(raw_timestamp, str):
-                any_timestamp = parse_iso_timestamp(raw_timestamp)
-                if any_timestamp is not None:
-                    any_ts_ms = int(any_timestamp.timestamp() * 1000)
-                    if not first_timestamp_ms or any_ts_ms < first_timestamp_ms:
-                        first_timestamp_ms = any_ts_ms
-            if event.get("isSidechain") is True:
-                continue
-            timestamp = parse_iso_timestamp(event.get("timestamp", ""))
-            event_ts_ms = None
-            if timestamp is not None:
-                event_ts_ms = int(timestamp.timestamp() * 1000)
-                latest_timestamp_ms = max(latest_timestamp_ms, event_ts_ms)
-                if started_at is None:
-                    started_at = to_local_date(timestamp)
-            session_id = event.get("sessionId") or session_id
-            cwd = event.get("cwd") or cwd
+    diagnostics = diagnostics if diagnostics is not None else []
+    for _, event in _iter_jsonl(file_path, diagnostics):
+        record_uuid = event.get("uuid")
+        if isinstance(record_uuid, str) and record_uuid:
+            uuids.add(record_uuid)
+            if not seen_uuid_record:
+                seen_uuid_record = True
+                parent = event.get("parentUuid")
+                first_parent_uuid = parent if isinstance(parent, str) and parent else None
+        raw_timestamp = event.get("timestamp")
+        if isinstance(raw_timestamp, str):
+            any_timestamp = parse_iso_timestamp(raw_timestamp)
+            if any_timestamp is not None:
+                any_ts_ms = int(any_timestamp.timestamp() * 1000)
+                if not first_timestamp_ms or any_ts_ms < first_timestamp_ms:
+                    first_timestamp_ms = any_ts_ms
+        if event.get("isSidechain") is True:
+            continue
+        timestamp = parse_iso_timestamp(event.get("timestamp", ""))
+        event_ts_ms = None
+        if timestamp is not None:
+            event_ts_ms = int(timestamp.timestamp() * 1000)
+            latest_timestamp_ms = max(latest_timestamp_ms, event_ts_ms)
+            if started_at is None:
+                started_at = to_local_date(timestamp)
+        session_id = event.get("sessionId") or session_id
+        cwd = event.get("cwd") or cwd
 
-            if event.get("type") == "user":
-                text = _extract_text_content((event.get("message") or {}).get("content"))
-                if not text:
-                    continue
-                if first_user_text is None:
-                    first_user_text = text
-                messages.append(MessageTurn(role="user", content=text, time_created=event_ts_ms))
-                pending_user_turns.append(len(messages) - 1)
+        if event.get("type") == "user":
+            text = _extract_text_content((event.get("message") or {}).get("content"))
+            if not text:
                 continue
+            if first_user_text is None:
+                first_user_text = text
+            messages.append(MessageTurn(role="user", content=text, time_created=event_ts_ms))
+            pending_user_turns.append(len(messages) - 1)
+            continue
 
-            if event.get("type") == "assistant":
-                message = event.get("message") or {}
-                model = (message.get("model") or "").strip()
-                if model:
-                    models.add(model)
-                    for index in pending_user_turns:
-                        messages[index] = messages[index]._replace(model=model)
-                pending_user_turns.clear()
-                text = _extract_text_content(message.get("content"))
-                if text:
-                    messages.append(
-                        MessageTurn(role="assistant", content=text, time_created=event_ts_ms, model=model or None)
-                    )
+        if event.get("type") == "assistant":
+            message = event.get("message") or {}
+            model = (message.get("model") or "").strip()
+            if model:
+                models.add(model)
+                for index in pending_user_turns:
+                    messages[index] = messages[index]._replace(model=model)
+            pending_user_turns.clear()
+            text = _extract_text_content(message.get("content"))
+            if text:
+                messages.append(
+                    MessageTurn(role="assistant", content=text, time_created=event_ts_ms, model=model or None)
+                )
 
     if not session_id or not messages or latest_timestamp_ms == 0 or started_at is None:
         return None
@@ -375,7 +405,8 @@ def export_claude_code(
     history_files: tuple[Path, ...] = DEFAULT_CLAUDE_HISTORY_FILES,
     backfill_dir: Path | None = None,
 ) -> dict[str, Any]:
-    history_titles = _load_history_titles(history_files)
+    warnings: list[dict[str, Any]] = []
+    history_titles = _load_history_titles(history_files, warnings)
     session_files = _iter_session_files(project_dirs)
     source_state = state.get("claude_code", {}) if dry_run else state.setdefault("claude_code", {})
     sessions = source_state.get("sessions", {}) if dry_run else source_state.setdefault("sessions", {})
@@ -384,14 +415,26 @@ def export_claude_code(
     exported = 0
     scanned = 0
     latest_seen = 0
-    warnings: list[dict[str, Any]] = []
+    failed = 0
+    skipped_shrunk = 0
     if not dry_run:
         output_dir.mkdir(parents=True, exist_ok=True)
 
     for file_path in session_files:
-        parsed = parse_claude_session_file(file_path, history_titles, backfill_dir=backfill_dir)
+        diagnostic_start = len(warnings)
+        try:
+            file_mtime_ns = file_path.stat().st_mtime_ns
+            parsed = parse_claude_session_file(
+                file_path, history_titles, backfill_dir=backfill_dir, diagnostics=warnings,
+            )
+        except Exception as error:  # noqa: BLE001 - isolate one unreadable session
+            failed += 1
+            warnings.append({"path": str(file_path), "error": f"cannot parse session ({type(error).__name__})"})
+            continue
+        damaged = any(item.get("kind") == "skipped_line" for item in warnings[diagnostic_start:])
         if parsed is None:
             continue
+        warnings.extend(parsed.warnings)
         scanned += 1
         latest_seen = max(latest_seen, parsed.latest_timestamp_ms)
         if since_date and date.fromisoformat(parsed.record.date) < since_date:
@@ -405,15 +448,20 @@ def export_claude_code(
         output_exists = output_path is not None and output_path.is_file()
         previous_backfill = previous.get("backfill_mtime_ns")
         backfill_unchanged = parsed.backfill_mtime_ns == (int(previous_backfill) if previous_backfill else None)
-        if not full and parsed.latest_timestamp_ms <= previous_timestamp and output_exists and backfill_unchanged:
+        if (not full and not damaged and not previous.get("incomplete")
+                and parsed.latest_timestamp_ms <= previous_timestamp and output_exists and backfill_unchanged
+                and previous.get("source_mtime_ns") == file_mtime_ns):
             continue
 
-        if previous_output:
-            if not dry_run:
-                output_path = resolve_output_path(
-                    output_dir, previous_output, parsed.record.date, parsed.record.title
-                )
-        else:
+        try:
+            rendered = render_markdown(parsed.record)
+            payload = rendered.encode("utf-8")
+        except (ValueError, TypeError, UnicodeError) as error:
+            failed += 1
+            warnings.append({"path": str(file_path), "error": f"cannot render session ({type(error).__name__})"})
+            continue
+
+        if not previous_output:
             if identity_index is None:
                 identity_index = {}
                 for archive in output_dir.glob("*.md"):
@@ -450,9 +498,28 @@ def export_claude_code(
                 )
             else:
                 output_path = unique_output_path(output_dir, parsed.record.date, parsed.record.title)
+        if damaged and output_path.is_file() and len(payload) < output_path.stat().st_size:
+            skipped_shrunk += 1
+            warnings.append({"path": str(file_path), "error": "kept existing archive: damaged transcript would shrink it"})
+            if not dry_run:
+                sessions[session_id] = {**previous, "output_file": output_path.name, "incomplete": True}
+            continue
         if not dry_run:
-            file_mtime_ns = file_path.stat().st_mtime_ns
-            output_path.write_text(render_markdown(parsed.record), encoding="utf-8")
+            temp_path: Path | None = None
+            try:
+                if previous_output:
+                    output_path = resolve_output_path(output_dir, previous_output, parsed.record.date, parsed.record.title)
+                with tempfile.NamedTemporaryFile(dir=output_dir, prefix=".claude-export-", delete=False) as handle:
+                    temp_path = Path(handle.name)
+                    handle.write(payload)
+                temp_path.replace(output_path)
+            except OSError as error:
+                failed += 1
+                warnings.append({"path": str(file_path), "error": f"cannot write archive ({type(error).__name__})"})
+                continue
+            finally:
+                if temp_path is not None:
+                    temp_path.unlink(missing_ok=True)
             session_state = {
                 "latest_timestamp": parsed.latest_timestamp_ms,
                 "output_file": output_path.name,
@@ -460,11 +527,18 @@ def export_claude_code(
             }
             if parsed.backfill_mtime_ns is not None:
                 session_state["backfill_mtime_ns"] = parsed.backfill_mtime_ns
+            # Do not burn the timestamp of a partial export: repairing an older
+            # line must be picked up even if the last event did not change.
+            if damaged:
+                session_state["latest_timestamp"] = previous_timestamp
+                session_state["incomplete"] = True
             sessions[session_id] = session_state
         exported += 1
-        warnings.extend(parsed.warnings)
 
     result: dict[str, Any] = {"source": "claude_code", "scanned": scanned, "exported": exported, "latest_seen": latest_seen}
+    result.update(failed=failed, skipped_shrunk=skipped_shrunk,
+                  skipped_lines=sum(item.get("kind") == "skipped_line" for item in warnings),
+                  recovered_lines=sum(item.get("kind") == "recovered_line" for item in warnings))
     if warnings:
         result["warnings"] = warnings
     return result

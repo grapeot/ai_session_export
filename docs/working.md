@@ -1,5 +1,12 @@
 ## Changelog
 
+### 2026-11-14
+
+- Issue #18: `claude_code._iter_jsonl()` decodes UTF-8 per physical line, recovers leading NUL padding, skips malformed JSON/non-object records, and records file/line diagnostics without transcript contents. Session parse failures are isolated; history JSONL uses the same reader.
+- Export results / CLI: `skipped_lines`, `recovered_lines`, `skipped_shrunk`; per-file failures use the existing `failed` / nonzero-exit contract. Partial exports keep an `incomplete` state flag and do not advance timestamps; a repaired line remains retryable at the same final event timestamp. Damaged re-exports cannot overwrite a larger existing archive.
+- Regression coverage: `tests/test_claude_malformed.py` (NUL recovery, invalid JSON/UTF-8/non-object records, fully corrupt files, history corruption, failure isolation, archive preservation, repair retry, dry-run immutability, CLI diagnostics, all-source continuation).
+- Review follow-up: history field validation runs per line; incremental selection also checks `source_mtime_ns` to pick up repaired files with unchanged final timestamps; UTF-8 encoding happens before output-path changes; failed writes leave prior state untouched and use a same-directory temporary file plus atomic replacement. Added unencodable-text / fully corrupt repair / write-failure regressions. Validation: `python -m pytest tests/ -q` → 225 passed, 6 skipped (live).
+
 ### 2026-11-12
 
 - Added the WorkBuddy source adapter (`src/ai_session_export/sources/workbuddy.py`), registered in `sources/__init__.py`, `cli.py` (`--source workbuddy`, `--workbuddy-dir`, `--workbuddy-db`, included in `all`) and `state.py` (`DEFAULT_STATE["workbuddy"]`). Storage was mapped from real WorkBuddy 5.9.4 tasks driven through the app's own UI with a local model: per-task JSONL under `~/.workbuddy-ai/projects/<cwd>/`, Responses-style items, and a `workbuddy.db` `sessions` table carrying `title`, `custom_title` (rename), `status` and `deleted_at`. `~/.workbuddy/projects` is also scanned (listed in the app bundle; assumed pre-5.9, unverified) and a session present in both roots is read once, from the newest file.

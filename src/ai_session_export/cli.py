@@ -446,6 +446,10 @@ def main() -> None:
             failed = int(result.get("failed", 0))
             failure_summary = f" failed={failed}" if failed else ""
             extra = ""
+            if source == "claude_code":
+                for key in ("skipped_lines", "recovered_lines", "skipped_shrunk"):
+                    if result.get(key):
+                        extra += f" {key}={result[key]}"
             if source == "opencode":
                 overwritten = int(result.get("overwritten", 0))
                 skipped_shrunk = int(result.get("skipped_shrunk", 0))
